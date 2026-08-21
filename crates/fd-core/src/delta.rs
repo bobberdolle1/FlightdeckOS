@@ -33,11 +33,9 @@ pub enum DeltaField {
     SimState,
     SimRate,
     SlewActive,
-    A32nxApuN,
-    A32nxApuBleedValve,
-    A32nxFlapsHandleIndex,
-    A32nxNavLogo,
-    A32nxPack1PbOn,
+    /// An aircraft-specific extension value changed. The payload is the
+    /// opaque numeric field id (meaning owned by the aircraft layer).
+    AircraftValue(u16),
 }
 
 /// An observable state event with a monotonic sequence number.
@@ -128,26 +126,15 @@ pub fn diff(prev: &TelemetrySnapshot, next: &TelemetrySnapshot) -> Vec<DeltaFiel
         prev.sim_timing.slew_active != next.sim_timing.slew_active,
         DeltaField::SlewActive,
     );
-    chk(
-        prev.a32nx.apu_n_percent != next.a32nx.apu_n_percent,
-        DeltaField::A32nxApuN,
-    );
-    chk(
-        prev.a32nx.apu_bleed_valve_open != next.a32nx.apu_bleed_valve_open,
-        DeltaField::A32nxApuBleedValve,
-    );
-    chk(
-        prev.a32nx.flaps_handle_index != next.a32nx.flaps_handle_index,
-        DeltaField::A32nxFlapsHandleIndex,
-    );
-    chk(
-        prev.a32nx.nav_logo != next.a32nx.nav_logo,
-        DeltaField::A32nxNavLogo,
-    );
-    chk(
-        prev.a32nx.pack_1_pb_on != next.a32nx.pack_1_pb_on,
-        DeltaField::A32nxPack1PbOn,
-    );
+    // Aircraft-specific extension values: compare the union of keys.
+    let mut ext_keys: std::collections::BTreeSet<u16> =
+        prev.aircraft_values.keys().copied().collect();
+    ext_keys.extend(next.aircraft_values.keys().copied());
+    for key in ext_keys {
+        if prev.aircraft_values.get(&key) != next.aircraft_values.get(&key) {
+            changed.push(DeltaField::AircraftValue(key));
+        }
+    }
 
     changed
 }
@@ -189,10 +176,10 @@ mod tests {
     }
 
     #[test]
-    fn a32nx_extension_changes_are_reported() {
+    fn aircraft_extension_changes_are_reported() {
         let a = snap(0.0);
         let mut b = a.clone();
-        b.a32nx.apu_n_percent = Some(crate::units::Percent::new(99.0));
-        assert_eq!(diff(&a, &b), vec![DeltaField::A32nxApuN]);
+        b.aircraft_values.insert(7, 99.0);
+        assert_eq!(diff(&a, &b), vec![DeltaField::AircraftValue(7)]);
     }
 }

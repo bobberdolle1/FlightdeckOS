@@ -8,11 +8,13 @@
 //! trace is byte-identical. The decision path never reads wall clock, RNG,
 //! or network state.
 
-use fd_core::actions::{ActionCatalog, Actor, CockpitAction};
+use fd_core::actions::{ActionCatalog, ActionId, ActionStatus, Actor, CockpitAction};
 use fd_core::adapter::{AdapterError, SimulatorAdapter};
 use fd_core::events::EventSource;
 use fd_core::telemetry::TelemetrySnapshot;
 use thiserror::Error;
+
+use fd_sop::engine::{FlowEngine, SopEvent};
 
 use crate::executor::{ActionExecutor, DeadlineTicks};
 use crate::ingest;
@@ -51,6 +53,12 @@ pub struct Runtime<W: TraceSink> {
     catalog: ActionCatalog,
     trace: W,
     last: Option<TelemetrySnapshot>,
+    /// Optional SOP flow engine (Task 2). Started explicitly via
+    /// [`Runtime::start_flow`]; no automatic phase triggers.
+    flows: Option<FlowEngine>,
+    /// Terminal action outcomes drained for flow processing (applied on the
+    /// next tick's flow pass — deterministic single-pass ordering).
+    flow_outcomes: Vec<(ActionId, ActionStatus)>,
     /// Set on the first trace failure: the runtime then refuses all further
     /// work (fail-stop). In-memory state that missed its mandatory trace
     /// events is discarded when the poisoned runtime is dropped — it must
@@ -75,8 +83,29 @@ impl<W: TraceSink> Runtime<W> {
             catalog,
             trace,
             last: None,
+            flows: None,
+            flow_outcomes: Vec::new(),
             poisoned: None,
         }
+    }
+
+    /// Start an SOP flow instance (explicit start; no automatic phase
+    /// triggers in Task 2).
+    pub fn start_flow(
+        &mut self,
+        flow: fd_sop::package::FlowDefinition,
+    ) -> Result<(), RuntimeError> {
+        self.check_poisoned()?;
+        if self.flows.is_some() {
+            return Err(RuntimeError::Poisoned("a flow is already active".into()));
+        }
+        self.flows = Some(FlowEngine::new(flow));
+        Ok(())
+    }
+
+    /// Current flow status, if a flow was started.
+    pub fn flow_status(&self) -> Option<fd_sop::engine::FlowStatus> {
+        self.flows.as_ref().map(|f| f.status())
     }
 
     /// Record a trace failure and poison the runtime.
@@ -165,6 +194,35 @@ impl<W: TraceSink> Runtime<W> {
                     .advance(&self.catalog, self.adapter.as_mut(), &snapshot),
             );
 
+            // 3b. SOP flow pass (Task 2): outcomes from THIS tick's advance
+            // are reported first, then newly-ready action steps are staged
+            // through the same two-phase submit. Their ActionRequested
+            // events join this tick's buffered trace; staged requests are
+            // committed together with everything else after the trace
+            // append succeeds.
+            if let Some(flows) = self.flows.as_mut() {
+                let mut pass = fd_sop::engine::FlowTickOutput::default();
+                flows.report_outcomes(&self.flow_outcomes, &mut pass);
+                let processed = flows.process(&snapshot);
+                pass.events.extend(processed.events);
+                pass.requests.extend(processed.requests);
+
+                for evt in &pass.events {
+                    events.push(sop_event_to_trace(evt.clone(), snapshot.timestamp));
+                }
+                for req in pass.requests {
+                    let seq = self.session.next_seq();
+                    let (id, ev) =
+                        self.executor
+                            .submit(req.action, Actor::Runtime, snapshot.timestamp, seq);
+                    self.flows
+                        .as_mut()
+                        .expect("flows present")
+                        .assign_action_id(&req.step_id, id);
+                    events.push(ev);
+                }
+            }
+
             self.last = Some(snapshot);
         }
 
@@ -177,6 +235,11 @@ impl<W: TraceSink> Runtime<W> {
             }
             stats.events += 1;
         }
+
+        // 5. Trace succeeded: commit staged SOP requests and drain terminal
+        // outcomes for the next tick's flow pass.
+        self.executor.commit();
+        self.flow_outcomes = self.executor.take_completed();
 
         Ok(stats)
     }
@@ -214,10 +277,92 @@ impl<W: TraceSink> Runtime<W> {
     }
 }
 
+/// Map an SOP event onto the runtime trace (stamping happens via set_seq).
+fn sop_event_to_trace(ev: SopEvent, ts: fd_core::telemetry::SimTimestamp) -> TraceEvent {
+    match ev {
+        SopEvent::FlowStarted { flow } => TraceEvent::FlowStarted {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+        },
+        SopEvent::StepReady { flow, step } => TraceEvent::StepReady {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+            step,
+        },
+        SopEvent::StepWaitingForVerification { flow, step } => {
+            TraceEvent::StepWaitingForVerification {
+                seq: fd_core::events::EventSeq::new(u64::MAX),
+                ts,
+                flow,
+                step,
+            }
+        }
+        SopEvent::StepActionRequested { flow, step, action } => TraceEvent::StepActionRequested {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+            step,
+            action,
+        },
+        SopEvent::StepVerified { flow, step } => TraceEvent::StepVerified {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+            step,
+        },
+        SopEvent::StepFailed { flow, step, reason } => TraceEvent::StepFailed {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+            step,
+            reason,
+        },
+        SopEvent::FlowCompleted { flow } => TraceEvent::FlowCompleted {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+        },
+        SopEvent::FlowFailed { flow } => TraceEvent::FlowFailed {
+            seq: fd_core::events::EventSeq::new(u64::MAX),
+            ts,
+            flow,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::a32nx_default_catalog;
+    /// Minimal beacon-only catalog for runtime tests (aircraft catalogs
+    /// live in fd-aircraft).
+    fn test_catalog() -> fd_core::actions::ActionCatalog {
+        use fd_core::actions::{
+            ActionCatalog, ActionKind, CatalogEntry, PreconditionDef, SwitchPosition,
+        };
+        ActionCatalog {
+            entries: vec![CatalogEntry {
+                kind: ActionKind::SetBeacon,
+                preconditions: vec![PreconditionDef {
+                    id: "beacon_state_known",
+                    check: |s| {
+                        if s.beacon_light.is_some() {
+                            Ok(())
+                        } else {
+                            Err("beacon state unknown")
+                        }
+                    },
+                }],
+                verify: |a, s| match a {
+                    CockpitAction::SetBeacon(pos) => s
+                        .beacon_light
+                        .map(|on| on == matches!(pos, SwitchPosition::On)),
+                    _ => None,
+                },
+            }],
+        }
+    }
     use crate::replay::{ReplayAdapter, ReplayStep};
     use crate::trace::TraceWriter;
     use fd_core::actions::{Actor, CockpitAction, SwitchPosition};
@@ -254,7 +399,7 @@ mod tests {
             Box::new(adapter),
             trace,
             SessionId(0),
-            a32nx_default_catalog(),
+            test_catalog(),
             DeadlineTicks::default(),
         );
         rt.start().unwrap();
@@ -287,6 +432,14 @@ mod tests {
                 TraceEvent::ActionFailed { .. } => "action_failed",
                 TraceEvent::SessionEnd { .. } => "session_end",
                 TraceEvent::SessionStart { .. } => "session_start",
+                TraceEvent::FlowStarted { .. }
+                | TraceEvent::StepReady { .. }
+                | TraceEvent::StepWaitingForVerification { .. }
+                | TraceEvent::StepActionRequested { .. }
+                | TraceEvent::StepVerified { .. }
+                | TraceEvent::StepFailed { .. }
+                | TraceEvent::FlowCompleted { .. }
+                | TraceEvent::FlowFailed { .. } => "sop",
             })
             .collect();
         // NOTE: the FIRST snapshot produces no delta (nothing to diff
@@ -339,7 +492,7 @@ mod tests {
             Box::new(adapter),
             writer,
             SessionId(0),
-            a32nx_default_catalog(),
+            test_catalog(),
             DeadlineTicks::default(),
         );
         rt.start().unwrap();
@@ -370,7 +523,7 @@ mod tests {
             Box::new(adapter),
             writer,
             SessionId(0),
-            a32nx_default_catalog(),
+            test_catalog(),
             DeadlineTicks::default(),
         );
         rt.start().unwrap();
@@ -409,7 +562,7 @@ mod tests {
             Box::new(adapter),
             trace,
             SessionId(0),
-            a32nx_default_catalog(),
+            test_catalog(),
             DeadlineTicks::default(),
         );
         rt.start().unwrap();
@@ -446,7 +599,7 @@ mod tests {
                 Box::new(adapter),
                 trace,
                 SessionId(0),
-                a32nx_default_catalog(),
+                test_catalog(),
                 DeadlineTicks::default(),
             );
             rt.start().unwrap();
@@ -487,7 +640,7 @@ mod tests {
             Box::new(adapter),
             trace,
             SessionId(0),
-            a32nx_default_catalog(),
+            test_catalog(),
             DeadlineTicks::default(),
         );
         rt.start().unwrap();

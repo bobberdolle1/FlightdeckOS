@@ -1,0 +1,26 @@
+# FlightdeckOS A32NX aircraft package manifest.
+#
+# Scope: this package is an ARCHITECTURE DEMONSTRATION slice (Task 2). It is
+# NOT a complete, certified airline procedure set. Operational semantics are
+# limited to what could be grounded in public FlyByWire documentation
+# (see procedures/before_start.toml provenance notes).
+
+package_id = "a32nx"
+display_name = "FlyByWire A32NX"
+aircraft_family = "Airbus A320 family"
+simulator = "MSFS"
+addon = "FlyByWire A32NX"
+package_version = "0.1.0"
+
+schema_version = 1          # fd-aircraft SCHEMA_VERSION
+runtime_api_version = 1     # fd-runtime RUNTIME_API_VERSION
+
+# Provenance of the definitions below: FlyByWire A32NX repository,
+# fbw-a32nx/docs/a320-simvars.md @ master (inspected 2026-08-21).
+addon_source_rev = "flybywiresim/aircraft@master 2026-08-21"
+
+# IMPORTANT: no live MSFS validation has been performed yet. Every binding
+# in this package is documented-but-unproven until the live spike runs.
+live_verified = false
+
+notes = "Architecture demonstration slice: beacon action + APU observe steps."

@@ -3,13 +3,17 @@
 //! Fail-closed semantics: non-finite or out-of-range values map to `None`
 //! (unknown) — FlightdeckOS never fabricates state.
 
-use fd_core::telemetry::{
-    A32NxState, NavLogoMode, Position, SimState, SimTimestamp, SimTiming, TelemetrySnapshot,
-};
+use std::collections::BTreeMap;
+
+use fd_core::telemetry::{Position, SimState, SimTimestamp, SimTiming, TelemetrySnapshot};
 use fd_core::units::{
-    AltitudeAglFt, AltitudeFt, AngleDeg, LatDeg, LonDeg, Percent, SpeedKt, VerticalSpeedFpm,
+    AltitudeAglFt, AltitudeFt, AngleDeg, LatDeg, LonDeg, SpeedKt, VerticalSpeedFpm,
 };
 
+use crate::bindings::{
+    EXT_ID_APU_BLEED_VALVE_OPEN, EXT_ID_APU_N, EXT_ID_FLAPS_HANDLE_INDEX, EXT_ID_NAV_LOGO,
+    EXT_ID_PACK1_PB_ON,
+};
 use crate::defs::*;
 
 fn as_bool(v: f64) -> Option<bool> {
@@ -86,20 +90,22 @@ pub fn map_telemetry(values: &[f64], event_paused: Option<bool>) -> TelemetrySna
         slew_active: as_bool(v(IDX_SLEW)),
     };
 
-    snapshot.a32nx = A32NxState {
-        apu_n_percent: as_number(v(IDX_A32NX_APU_N)).map(Percent::new),
-        apu_bleed_valve_open: as_bool(v(IDX_A32NX_APU_BLEED)),
-        flaps_handle_index: {
-            let f = v(IDX_A32NX_FLAPS);
-            if f.is_finite() && (0.0..=4.0).contains(&f) && f.fract() == 0.0 {
-                Some(f as u8)
-            } else {
-                None
-            }
-        },
-        nav_logo: NavLogoMode::from_raw(v(IDX_A32NX_NAV_LOGO)),
-        pack_1_pb_on: as_bool(v(IDX_A32NX_PACK1)),
-    };
+    // Aircraft-specific normalized values (opaque numeric ids owned by this
+    // adapter's binding table). Non-finite reads are simply omitted: absent
+    // means unknown, never zero.
+    let mut aircraft_values = BTreeMap::new();
+    for (id, raw) in [
+        (EXT_ID_APU_N, v(IDX_A32NX_APU_N)),
+        (EXT_ID_APU_BLEED_VALVE_OPEN, v(IDX_A32NX_APU_BLEED)),
+        (EXT_ID_FLAPS_HANDLE_INDEX, v(IDX_A32NX_FLAPS)),
+        (EXT_ID_NAV_LOGO, v(IDX_A32NX_NAV_LOGO)),
+        (EXT_ID_PACK1_PB_ON, v(IDX_A32NX_PACK1)),
+    ] {
+        if let Some(val) = as_number(raw) {
+            aircraft_values.insert(id, val);
+        }
+    }
+    snapshot.aircraft_values = aircraft_values;
 
     snapshot
 }
@@ -118,7 +124,7 @@ mod tests {
         // Zero is a real observation for these bools, not "unknown".
         assert_eq!(s.on_ground, Some(false));
         assert_eq!(s.beacon_light, Some(false));
-        assert_eq!(s.a32nx.apu_n_percent, Some(Percent::new(0.0)));
+        assert_eq!(s.aircraft_values.get(&EXT_ID_APU_N), Some(&0.0));
         assert_eq!(s.sim_timing.state, SimState::Running); // PAUSED=0
     }
 
@@ -163,17 +169,6 @@ mod tests {
         values[IDX_ABS_TIME] = 42.5;
         let s = map_telemetry(&values, None);
         assert_eq!(s.timestamp.ms, 42_500);
-    }
-
-    #[test]
-    fn a32nx_nav_logo_enum_decodes() {
-        let mut values = zero_values();
-        values[IDX_A32NX_NAV_LOGO] = 2.0;
-        let s = map_telemetry(&values, None);
-        assert_eq!(s.a32nx.nav_logo, Some(NavLogoMode::Sys2));
-        values[IDX_A32NX_NAV_LOGO] = 9.0;
-        let s = map_telemetry(&values, None);
-        assert_eq!(s.a32nx.nav_logo, None); // out of enum range → unknown
     }
 
     #[test]

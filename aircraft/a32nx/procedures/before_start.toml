@@ -1,0 +1,50 @@
+# FlightdeckOS — before_start flow (A32NX architecture slice).
+#
+# SCOPE: this is an ARCHITECTURE DEMONSTRATION of the SOP primitives
+# (observe steps, one closed action step, dependencies, tri-state
+# conditions with Unknown semantics). It is deliberately SMALL and is
+# NOT a complete or certified A320 Before Start procedure.
+#
+# Provenance for referenced state:
+#   apu_n_percent           -> FBW a320-simvars.md: A32NX_APU_N
+#                              ("APU RPM in percent of max")
+#   apu_bleed_valve_open    -> FBW a320-simvars.md:
+#                              A32NX_APU_BLEED_AIR_VALVE_OPEN ("Bool",
+#                              "Indicates if the APU bleed air valve is open")
+#   beacon_light            -> standard MSFS simvar LIGHT BEACON
+#                              ("the state of the beacon light switch")
+#
+# The 90 % threshold is an architecture-demonstration choice for
+# "APU up to speed" (public A320 material places nominal APU speed near
+# 90 % N); it encodes no airline-specific procedure.
+
+id = "before_start"
+title = "Before Start (architecture slice)"
+scope_note = """
+Demonstration slice for FlightdeckOS Task 2. Exercises: observe steps,
+one closed action step, dependency ordering, tri-state conditions.
+NOT a complete or certified A320 Before Start procedure."""
+
+[[steps]]
+id = "beacon_on"
+actor = "FirstOfficer"
+kind = "action"
+action = "set_beacon_on"
+
+[[steps]]
+id = "apu_available"
+actor = "FirstOfficer"
+kind = "observe"
+[steps.condition]
+field = "apu_n_percent"
+op = "at_least"
+value = 90.0
+
+[[steps]]
+id = "apu_bleed_open"
+actor = "FirstOfficer"
+depends_on = ["apu_available"]
+kind = "observe"
+[steps.condition]
+field = "apu_bleed_valve_open"
+op = "is_true"

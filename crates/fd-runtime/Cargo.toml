@@ -7,9 +7,11 @@ description = "FlightdeckOS runtime: session sequencing, snapshot ingestion, pha
 
 [dependencies]
 fd-core = { path = "../fd-core" }
+fd-sop = { path = "../fd-sop" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3.17"
+fd-aircraft = { path = "../fd-aircraft" }

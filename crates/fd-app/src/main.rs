@@ -11,12 +11,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use fd_aircraft::catalog::a32nx_default_catalog;
 use fd_core::actions::Actor;
 use fd_core::events::EventSource;
-use fd_runtime::{
-    DeadlineTicks, ReplayAdapter, ReplayStep, Runtime, SessionId, TraceWriter,
-    a32nx_default_catalog,
-};
+use fd_runtime::{DeadlineTicks, ReplayAdapter, ReplayStep, Runtime, SessionId, TraceWriter};
+use fd_sop::package::load_package;
 
 #[derive(Parser)]
 #[command(name = "fd", version, about = "FlightdeckOS runtime host")]
@@ -38,6 +37,17 @@ enum Command {
         /// Injected session id for determinism (default 0).
         #[arg(long, default_value_t = 0)]
         session_id: u64,
+        /// Optional aircraft package directory; starts the named flow.
+        #[arg(long)]
+        package: Option<PathBuf>,
+        /// Flow id to start (requires --package).
+        #[arg(long)]
+        flow: Option<String>,
+    },
+    /// Validate an aircraft package directory (fail-closed).
+    Package {
+        #[arg(long)]
+        dir: PathBuf,
     },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
@@ -62,17 +72,63 @@ fn main() -> anyhow::Result<()> {
             fixture,
             out,
             session_id,
-        } => run_replay(&fixture, out, session_id),
+            package,
+            flow,
+        } => {
+            if package.is_some() != flow.is_some() {
+                return Err(anyhow::anyhow!(
+                    "--package and --flow must be used together"
+                ));
+            }
+            run_replay(&fixture, out, session_id, package, flow)
+        }
         Command::Live {
             out,
             max_ticks,
             interval_ms,
         } => run_live(out, max_ticks, interval_ms),
+        Command::Package { dir } => run_package_validate(&dir),
         Command::Bindings => {
             print_bindings();
             Ok(())
         }
     }
+}
+
+fn run_package_validate(dir: &std::path::Path) -> anyhow::Result<()> {
+    let pkg = load_package(dir).map_err(|e| anyhow::anyhow!("package INVALID: {e}"))?;
+    println!(
+        "package: {} ({})",
+        pkg.manifest.package_id, pkg.manifest.display_name
+    );
+    println!(
+        "family/addon/sim: {} / {} / {}",
+        pkg.manifest.aircraft_family, pkg.manifest.addon, pkg.manifest.simulator
+    );
+    println!(
+        "schema_version: {} · runtime_api_version: {}",
+        pkg.manifest.schema_version, pkg.manifest.runtime_api_version
+    );
+    println!("live_verified: {}", pkg.manifest.live_verified);
+    println!("roles: {:?}", pkg.roles);
+    println!("flows: {}", pkg.flows.len());
+    for f in &pkg.flows {
+        println!("  - {} \"{}\" ({} steps)", f.id, f.title, f.steps.len());
+        for st in &f.steps {
+            let kind = match &st.kind {
+                fd_sop::package::StepKind::Observe { .. } => "observe",
+                fd_sop::package::StepKind::Action { .. } => "action",
+            };
+            println!(
+                "      {:<18} actor={:<14} kind={}",
+                st.id,
+                format!("{:?}", st.actor).to_lowercase(),
+                kind
+            );
+        }
+    }
+    println!("PACKAGE VALID");
+    Ok(())
 }
 
 fn default_out(name: &str) -> PathBuf {
@@ -81,7 +137,13 @@ fn default_out(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-fn run_replay(fixture: &PathBuf, out: Option<PathBuf>, session_id: u64) -> anyhow::Result<()> {
+fn run_replay(
+    fixture: &PathBuf,
+    out: Option<PathBuf>,
+    session_id: u64,
+    package: Option<PathBuf>,
+    flow: Option<String>,
+) -> anyhow::Result<()> {
     let steps = fd_runtime::replay::load_fixture(fixture)
         .map_err(|e| anyhow::anyhow!("fixture load failed: {e}"))?;
     let out = out.unwrap_or_else(|| default_out("replay.jsonl"));
@@ -101,6 +163,17 @@ fn run_replay(fixture: &PathBuf, out: Option<PathBuf>, session_id: u64) -> anyho
         .start()
         .map_err(|e| anyhow::anyhow!("replay start failed: {e}"))?;
 
+    if let (Some(pkg_dir), Some(flow_id)) = (&package, &flow) {
+        let pkg = load_package(pkg_dir).map_err(|e| anyhow::anyhow!("package load failed: {e}"))?;
+        let def = pkg
+            .flows
+            .iter()
+            .find(|f| &f.id == flow_id)
+            .ok_or_else(|| anyhow::anyhow!("flow `{flow_id}` not found in package"))?
+            .clone();
+        runtime.start_flow(def)?;
+    }
+
     let mut ticks = 0u64;
     for step in steps {
         match step {
@@ -117,7 +190,11 @@ fn run_replay(fixture: &PathBuf, out: Option<PathBuf>, session_id: u64) -> anyho
         }
     }
     let final_phase = runtime.current_phase();
+    let flow_status = runtime.flow_status();
     runtime.finish()?;
+    if let Some(st) = flow_status {
+        println!("Flow {}: {:?}", flow.as_deref().unwrap_or("?"), st);
+    }
     println!(
         "REPLAY OK: {} ticks, phase {}, trace written to {}",
         ticks,

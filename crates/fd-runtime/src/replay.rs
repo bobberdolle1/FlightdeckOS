@@ -27,8 +27,10 @@ pub enum ReplayStep {
     },
 }
 
-/// Fixture file format version. Readers reject unknown versions.
-pub const REPLAY_VERSION: u8 = 1;
+/// Fixture file format version. v2: canonical snapshot gained the opaque
+/// `aircraft_values` extension map and lost the typed a32nx struct.
+/// Readers reject unknown versions.
+pub const REPLAY_VERSION: u8 = 2;
 
 /// A fixture line: `{"v": 1, <step...>}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,9 +144,9 @@ impl SimulatorAdapter for ReplayAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fd_core::actions::NavLogoMode;
     use fd_core::actions::{Actor, CockpitAction, SwitchPosition};
     use fd_core::events::EventSeq;
-    use fd_core::telemetry::NavLogoMode;
 
     #[test]
     fn fixture_roundtrip_parses_snapshots_and_actions() {
@@ -153,12 +155,12 @@ mod tests {
         let text = format!(
             "{}\n{}\n",
             serde_json::to_string(&ReplayLine {
-                v: 1,
+                v: 2,
                 step: ReplayStep::Snapshot(snap)
             })
             .unwrap(),
             serde_json::to_string(&ReplayLine {
-                v: 1,
+                v: 2,
                 step: ReplayStep::Action {
                     ts: SimTimestamp::new(6),
                     action: CockpitAction::SetBeacon(SwitchPosition::On),

@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/fd-core",
+    "crates/fd-aircraft",
+    "crates/fd-sop",
     "crates/fd-simconnect",
     "crates/fd-runtime",
     "crates/fd-app",

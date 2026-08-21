@@ -14,8 +14,8 @@
 //! every entry here is a documented binding that must be proven in the live
 //! spike before it graduates to `Supported`-in-production.
 
+use fd_core::actions::NavLogoMode;
 use fd_core::actions::{CockpitAction, SwitchPosition};
-use fd_core::telemetry::NavLogoMode;
 
 /// Raw write primitives supported by the adapter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +43,16 @@ pub struct BindingEntry {
 }
 
 pub const TESTED_ADDON_VERSION: &str = "A32NX master @ 2026-08-21 (NOT live-verified)";
+
+/// Stable numeric extension-value ids written into the canonical
+/// `aircraft_values` map by this adapter. The aircraft layer (fd-aircraft)
+/// owns their meaning; these constants are the single trusted mapping point
+/// between raw A32NX L:Vars and opaque canonical ids.
+pub const EXT_ID_APU_N: u16 = 1;
+pub const EXT_ID_APU_BLEED_VALVE_OPEN: u16 = 2;
+pub const EXT_ID_FLAPS_HANDLE_INDEX: u16 = 3;
+pub const EXT_ID_NAV_LOGO: u16 = 4;
+pub const EXT_ID_PACK1_PB_ON: u16 = 5;
 
 const MSFS_SDK_SIMVARS: &str =
     "MSFS SDK SimVars documentation (LIGHT BEACON, settable BOOL; BEACON_LIGHTS_SET key event)";

@@ -9,7 +9,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod catalog;
 pub mod executor;
 pub mod ingest;
 pub mod phase_tracker;
@@ -18,7 +17,6 @@ pub mod runtime;
 pub mod session;
 pub mod trace;
 
-pub use catalog::{a32nx_default_catalog, postcondition};
 pub use executor::{ActionExecutor, ActionRecord, DeadlineTicks};
 pub use replay::{ReplayAdapter, ReplayStep};
 pub use runtime::{Runtime, RuntimeError, TickStats};

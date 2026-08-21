@@ -18,7 +18,6 @@ use fd_core::adapter::SimulatorAdapter;
 use fd_core::events::EventSeq;
 use fd_core::telemetry::TelemetrySnapshot;
 
-use crate::catalog::postcondition;
 use crate::trace::TraceEvent;
 
 /// Number of runtime ticks after dispatch before verification times out.
@@ -31,19 +30,26 @@ impl Default for DeadlineTicks {
     }
 }
 
+/// Post-condition verifier for one action: does the snapshot confirm it?
+/// `Some(true)` confirmed / `Some(false)` contradicted / `None` unknown.
+pub type VerifyFn = fn(fd_core::actions::CockpitAction, &TelemetrySnapshot) -> Option<bool>;
+
 /// One in-flight action with its pipeline state.
 #[derive(Debug, Clone)]
 pub struct ActionRecord {
     pub request: ActionRequest,
     pub status: ActionStatus,
+    /// Verifier assigned during validation (from the catalog entry).
+    verify: Option<VerifyFn>,
     ticks_since_dispatch: u64,
 }
 
 impl ActionRecord {
-    pub fn new(request: ActionRequest) -> Self {
+    fn new(request: ActionRequest) -> Self {
         Self {
             request,
             status: ActionStatus::Requested,
+            verify: None,
             ticks_since_dispatch: 0,
         }
     }
@@ -56,6 +62,7 @@ pub struct ActionExecutor {
     /// been durably appended yet (two-phase submit, Task 1.2 F6).
     staged: VecDeque<ActionRecord>,
     pending: VecDeque<ActionRecord>,
+    completed: Vec<(ActionId, ActionStatus)>,
     next_id: u64,
     deadline: DeadlineTicks,
 }
@@ -65,6 +72,7 @@ impl ActionExecutor {
         Self {
             staged: VecDeque::new(),
             pending: VecDeque::new(),
+            completed: Vec::new(),
             next_id: 0,
             deadline,
         }
@@ -112,6 +120,12 @@ impl ActionExecutor {
         self.pending.len()
     }
 
+    /// Drain terminal action outcomes (Verified/Rejected/Failed/TimedOut)
+    /// observed since the last drain.
+    pub fn take_completed(&mut self) -> Vec<(ActionId, ActionStatus)> {
+        std::mem::take(&mut self.completed)
+    }
+
     /// Advance every pending action through as many pipeline stages as the
     /// current snapshot allows, in submission order.
     ///
@@ -137,8 +151,9 @@ impl ActionExecutor {
                 match rec.status {
                     ActionStatus::Requested => {
                         match step_validate(&rec, catalog, adapter, snapshot) {
-                            Ok(()) => {
+                            Ok(verify) => {
                                 rec.status = ActionStatus::Validated;
+                                rec.verify = Some(verify);
                                 progressed = true;
                                 events.push(TraceEvent::ActionValidated {
                                     seq: placeholder,
@@ -192,9 +207,14 @@ impl ActionExecutor {
                         if !paused {
                             rec.ticks_since_dispatch += 1;
                         }
-                        match postcondition(rec.request.action, snapshot) {
+                        let verify = rec
+                            .verify
+                            .expect("validated action always carries its verifier");
+                        match verify(rec.request.action, snapshot) {
                             Some(true) => {
                                 progressed = true;
+                                self.completed
+                                    .push((rec.request.id, ActionStatus::Verified));
                                 events.push(TraceEvent::ActionVerified {
                                     seq: placeholder,
                                     ts,
@@ -242,7 +262,7 @@ fn step_validate(
     catalog: &ActionCatalog,
     adapter: &dyn SimulatorAdapter,
     snapshot: &TelemetrySnapshot,
-) -> Result<(), ActionRejectionReason> {
+) -> Result<VerifyFn, ActionRejectionReason> {
     let kind = rec.request.action.kind();
     let entry = catalog
         .lookup(kind)
@@ -264,16 +284,44 @@ fn step_validate(
         })?;
     }
 
-    Ok(())
+    Ok(entry.verify)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::a32nx_default_catalog;
+    /// Minimal beacon-only catalog for runtime tests (aircraft catalogs
+    /// live in fd-aircraft).
+    fn test_catalog() -> fd_core::actions::ActionCatalog {
+        use fd_core::actions::{
+            ActionCatalog, ActionKind, CatalogEntry, PreconditionDef, SwitchPosition,
+        };
+        ActionCatalog {
+            entries: vec![CatalogEntry {
+                kind: ActionKind::SetBeacon,
+                preconditions: vec![PreconditionDef {
+                    id: "beacon_state_known",
+                    check: |s| {
+                        if s.beacon_light.is_some() {
+                            Ok(())
+                        } else {
+                            Err("beacon state unknown")
+                        }
+                    },
+                }],
+                verify: |a, s| match a {
+                    CockpitAction::SetBeacon(pos) => s
+                        .beacon_light
+                        .map(|on| on == matches!(pos, SwitchPosition::On)),
+                    _ => None,
+                },
+            }],
+        }
+    }
     use crate::replay::ReplayAdapter;
+    use fd_core::actions::NavLogoMode;
     use fd_core::actions::{Actor, CockpitAction, SwitchPosition};
-    use fd_core::telemetry::{NavLogoMode, SimTimestamp};
+    use fd_core::telemetry::SimTimestamp;
 
     fn snapshot_with_beacon(ts: u64, on: Option<bool>) -> TelemetrySnapshot {
         let mut s = TelemetrySnapshot::empty(SimTimestamp::new(ts));
@@ -296,7 +344,7 @@ mod tests {
     #[test]
     fn happy_path_validates_dispatches_then_verifies() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
 
         let id = submit_beacon(&mut ex, 0);
@@ -333,7 +381,7 @@ mod tests {
     #[test]
     fn already_satisfied_action_verifies_in_single_tick() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
@@ -352,7 +400,7 @@ mod tests {
     #[test]
     fn unknown_state_precondition_rejects_before_dispatch() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
@@ -400,7 +448,7 @@ mod tests {
     #[test]
     fn verification_times_out_after_deadline_ticks() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3)); // deadline = 3 ticks
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
@@ -432,7 +480,7 @@ mod tests {
     #[test]
     fn pause_freezes_deadline_then_verified_after_unpause_case_a() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3)); // deadline = 3 active ticks
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
@@ -474,7 +522,7 @@ mod tests {
     #[test]
     fn pause_does_not_reset_budget_timeout_still_fires_case_b() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
@@ -517,7 +565,7 @@ mod tests {
     #[test]
     fn adapter_write_failure_is_action_failed_not_rejected() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
-        let cat = a32nx_default_catalog();
+        let cat = test_catalog();
         let mut adapter = FailingWriteAdapter;
         submit_beacon(&mut ex, 0);
         let s = snapshot_with_beacon(10, Some(false));
@@ -547,6 +595,14 @@ mod tests {
             TraceEvent::ActionVerified { .. } => "action_verified",
             TraceEvent::ActionRejected { .. } => "action_rejected",
             TraceEvent::ActionFailed { .. } => "action_failed",
+            TraceEvent::FlowStarted { .. }
+            | TraceEvent::StepReady { .. }
+            | TraceEvent::StepWaitingForVerification { .. }
+            | TraceEvent::StepActionRequested { .. }
+            | TraceEvent::StepVerified { .. }
+            | TraceEvent::StepFailed { .. }
+            | TraceEvent::FlowCompleted { .. }
+            | TraceEvent::FlowFailed { .. } => "sop",
         }
     }
 

@@ -1,0 +1,2 @@
+# Crew roles available to flows in this package (closed registry).
+roles = ["Captain", "FirstOfficer"]

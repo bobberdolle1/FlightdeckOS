@@ -1,21 +1,61 @@
-//! Canonical telemetry state: a minimal generic core plus a small,
-//! aircraft-specific extension for the A32NX.
+//! Canonical telemetry state: a minimal generic core plus an opaque,
+//! numerically-keyed extension map for aircraft-specific values.
 //!
-//! Task 1 deliberately does NOT build a giant universal aircraft schema.
-//! The generic core contains only what is genuinely cross-aircraft and what
-//! the flight phase engine needs. Aircraft-specific values live in
-//! [`A32NxState`], which is a placeholder for aircraft-package-provided state
-//! (Phase 2 will move it into the aircraft package). Missing data is
-//! represented as `None` — FlightdeckOS never fabricates values.
+//! Task 2 moved all A32NX-specific typed state out of this crate into the
+//! aircraft layer (`fd-aircraft`). `fd-core` knows nothing about A32NX.
 //!
-//! All fields are optional because a simulator read may legitimately be
-//! unavailable for an aircraft/binding; "unknown" is a first-class state.
+//! Aircraft-specific values travel in
+//! [`TelemetrySnapshot::aircraft_values`]: an opaque map keyed by stable
+//! numeric ids assigned by trusted adapter code (fd-simconnect binding
+//! table); their meaning is owned by the aircraft layer. Missing data is
+//! represented as `None` / absent keys — FlightdeckOS never fabricates
+//! values.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::units::{
-    AltitudeAglFt, AltitudeFt, AngleDeg, LatDeg, LonDeg, Percent, SpeedKt, VerticalSpeedFpm,
+    AltitudeAglFt, AltitudeFt, AngleDeg, LatDeg, LonDeg, SpeedKt, VerticalSpeedFpm,
 };
+
+/// Serde helpers: JSON object with string keys (`{"1": 0.0}`) mapped onto
+/// `BTreeMap<u16, f64>` (serde_json cannot key maps by raw integers).
+mod ext_values_serde {
+    use super::BTreeMap;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(m: &BTreeMap<u16, f64>, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = ser.serialize_map(Some(m.len()))?;
+        for (k, v) in m {
+            map.serialize_entry(&k.to_string(), v)?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<BTreeMap<u16, f64>, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = BTreeMap<u16, f64>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of numeric-id -> value")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut m = BTreeMap::new();
+                while let Some(key) = access.next_key::<String>()? {
+                    let id: u16 = key.parse().map_err(serde::de::Error::custom)?;
+                    let value = access.next_value::<f64>()?;
+                    m.insert(id, value);
+                }
+                Ok(m)
+            }
+        }
+        de.deserialize_map(V)
+    }
+}
 
 /// Logical simulation timestamp in milliseconds.
 ///
@@ -73,7 +113,9 @@ impl Default for SimTiming {
     }
 }
 
-/// NAV/LOGO light switch position on the A32NX (documented enum, 0/1/2).
+/// Tri-state light switch (e.g. the NAV/LOGO light switch on Airbus-style
+/// overhead panels: Off / System 1 / System 2). Parameter of the closed
+/// [`crate::actions::CockpitAction::SetNavLogo`] action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavLogoMode {
@@ -83,7 +125,6 @@ pub enum NavLogoMode {
 }
 
 impl NavLogoMode {
-    /// Raw A32NX `A32NX_LIGHTS_NAV_LOGO` numeric value.
     pub const fn raw(self) -> f64 {
         match self {
             Self::Off => 0.0,
@@ -100,24 +141,6 @@ impl NavLogoMode {
             _ => None,
         }
     }
-}
-
-/// A32NX-specific canonical state (Task 1 subset — 5 proven read bindings).
-///
-/// These are *logical* values. The raw `L:`-var names are mapped in
-/// `fd-simconnect::bindings` and never appear here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct A32NxState {
-    /// APU RPM, percent of max. Source: `A32NX_APU_N`.
-    pub apu_n_percent: Option<Percent>,
-    /// APU bleed air valve open. Source: `A32NX_APU_BLEED_AIR_VALVE_OPEN`.
-    pub apu_bleed_valve_open: Option<bool>,
-    /// Physical flaps handle position 0..=4. Source: `A32NX_FLAPS_HANDLE_INDEX`.
-    pub flaps_handle_index: Option<u8>,
-    /// NAV/LOGO switch. Source: `A32NX_LIGHTS_NAV_LOGO`.
-    pub nav_logo: Option<NavLogoMode>,
-    /// PACK 1 pushbutton pressed (on). Source: `A32NX_OVHD_COND_PACK_1_PB_IS_ON`.
-    pub pack_1_pb_on: Option<bool>,
 }
 
 /// A single canonical snapshot of aircraft + simulator state.
@@ -151,7 +174,12 @@ pub struct TelemetrySnapshot {
     pub sim_timing: SimTiming,
 
     // -- aircraft-specific extension -----------------------------------------
-    pub a32nx: A32NxState,
+    /// Opaque aircraft-specific normalized values, keyed by a stable numeric
+    /// id assigned by trusted adapter code (fd-simconnect binding table).
+    /// `fd-core` deliberately attaches NO semantics to these ids; the
+    /// aircraft layer (fd-aircraft) owns their meaning. Absent key = unknown.
+    #[serde(with = "ext_values_serde", default)]
+    pub aircraft_values: BTreeMap<u16, f64>,
 }
 
 impl TelemetrySnapshot {
@@ -180,13 +208,7 @@ impl TelemetrySnapshot {
                 sim_rate: None,
                 slew_active: None,
             },
-            a32nx: A32NxState {
-                apu_n_percent: None,
-                apu_bleed_valve_open: None,
-                flaps_handle_index: None,
-                nav_logo: None,
-                pack_1_pb_on: None,
-            },
+            aircraft_values: BTreeMap::new(),
         }
     }
 }
@@ -201,7 +223,7 @@ mod tests {
         assert!(s.altitude_msl.is_none());
         assert!(s.on_ground.is_none());
         assert_eq!(s.sim_timing.state, SimState::Unknown);
-        assert!(s.a32nx.apu_n_percent.is_none());
+        assert!(s.aircraft_values.is_empty());
     }
 
     #[test]
@@ -216,5 +238,17 @@ mod tests {
     fn timestamp_ordering_is_by_ms() {
         assert!(SimTimestamp::new(1) < SimTimestamp::new(2));
         assert_eq!(SimTimestamp::new(5), SimTimestamp::new(5));
+    }
+
+    #[test]
+    fn ext_values_serde_roundtrip_via_string_keys() {
+        let mut s = TelemetrySnapshot::empty(SimTimestamp::new(3));
+        s.aircraft_values.insert(1, 95.5);
+        s.aircraft_values.insert(4, 2.0);
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains("\"aircraft_values\":{\"1\":95.5,\"4\":2.0}"));
+        let back: TelemetrySnapshot = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.aircraft_values.get(&1), Some(&95.5));
+        assert_eq!(back.aircraft_values.get(&4), Some(&2.0));
     }
 }

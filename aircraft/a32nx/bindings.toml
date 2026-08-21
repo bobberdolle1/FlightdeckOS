@@ -1,0 +1,16 @@
+# Read bindings declared by this package (provenance metadata).
+#
+# Names MUST resolve against the closed trusted set in fd-aircraft
+# (bindings_meta::KNOWN_READ_BINDINGS); unknown names fail package loading.
+# The raw L:Var mapping for these names lives exclusively in trusted code:
+# crates/fd-simconnect/src/{bindings.rs,mapping.rs,defs.rs}.
+#
+# All bindings are NOT LIVE VERIFIED (no MSFS available at authoring time).
+
+reads = [
+    "apu_n_percent",            # L:A32NX_APU_N                  (percent)
+    "apu_bleed_valve_open",     # L:A32NX_APU_BLEED_AIR_VALVE_OPEN (bool)
+    "flaps_handle_index",       # L:A32NX_FLAPS_HANDLE_INDEX      (0..=4)
+    "nav_logo_switch",          # L:A32NX_LIGHTS_NAV_LOGO         (0..=2)
+    "pack_1_pb_on",             # L:A32NX_OVHD_COND_PACK_1_PB_IS_ON (bool)
+]

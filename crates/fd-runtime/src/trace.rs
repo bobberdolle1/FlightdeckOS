@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::session::SessionId;
 
 /// Trace format version. Readers must reject unknown versions (fail-closed).
-pub const TRACE_VERSION: u8 = 1;
+/// Task 2: added SOP Flow*/Step* event kinds (deliberate version bump;
+/// readers of the old schema must fail closed).
+pub const TRACE_VERSION: u8 = 2;
 
 /// A version tag wrapper; readers check this before interpreting a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +101,54 @@ pub enum TraceEvent {
         ts: SimTimestamp,
         id: fd_core::actions::ActionId,
         failure: ActionFailure,
+    },
+    // -- SOP flow lifecycle (Task 2) --
+    FlowStarted {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+    },
+    StepReady {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+        step: String,
+    },
+    StepWaitingForVerification {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+        step: String,
+    },
+    StepActionRequested {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+        step: String,
+        action: fd_core::actions::CockpitAction,
+    },
+    StepVerified {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+        step: String,
+    },
+    StepFailed {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+        step: String,
+        reason: String,
+    },
+    FlowCompleted {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
+    },
+    FlowFailed {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        flow: String,
     },
 }
 
@@ -181,7 +231,40 @@ impl TraceEvent {
             | Self::ActionDispatched { seq, .. }
             | Self::ActionVerified { seq, .. }
             | Self::ActionRejected { seq, .. }
-            | Self::ActionFailed { seq, .. } => *seq,
+            | Self::ActionFailed { seq, .. }
+            | Self::FlowStarted { seq, .. }
+            | Self::StepReady { seq, .. }
+            | Self::StepWaitingForVerification { seq, .. }
+            | Self::StepActionRequested { seq, .. }
+            | Self::StepVerified { seq, .. }
+            | Self::StepFailed { seq, .. }
+            | Self::FlowCompleted { seq, .. }
+            | Self::FlowFailed { seq, .. } => *seq,
+        }
+    }
+
+    /// Kind tag for diagnostics/tests.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::SessionStart { .. } => "session_start",
+            Self::SessionEnd { .. } => "session_end",
+            Self::StateDelta { .. } => "state_delta",
+            Self::PhaseChange { .. } => "phase_change",
+            Self::SimStateChanged { .. } => "sim_state_changed",
+            Self::ActionRequested { .. } => "action_requested",
+            Self::ActionValidated { .. } => "action_validated",
+            Self::ActionDispatched { .. } => "action_dispatched",
+            Self::ActionVerified { .. } => "action_verified",
+            Self::ActionRejected { .. } => "action_rejected",
+            Self::ActionFailed { .. } => "action_failed",
+            Self::FlowStarted { .. } => "flow_started",
+            Self::StepReady { .. } => "step_ready",
+            Self::StepWaitingForVerification { .. } => "step_waiting_for_verification",
+            Self::StepActionRequested { .. } => "step_action_requested",
+            Self::StepVerified { .. } => "step_verified",
+            Self::StepFailed { .. } => "step_failed",
+            Self::FlowCompleted { .. } => "flow_completed",
+            Self::FlowFailed { .. } => "flow_failed",
         }
     }
 
@@ -200,6 +283,14 @@ impl TraceEvent {
             Self::ActionVerified { seq: s, .. } => *s = seq,
             Self::ActionRejected { seq: s, .. } => *s = seq,
             Self::ActionFailed { seq: s, .. } => *s = seq,
+            Self::FlowStarted { seq: s, .. }
+            | Self::StepReady { seq: s, .. }
+            | Self::StepWaitingForVerification { seq: s, .. }
+            | Self::StepActionRequested { seq: s, .. }
+            | Self::StepVerified { seq: s, .. }
+            | Self::StepFailed { seq: s, .. }
+            | Self::FlowCompleted { seq: s, .. }
+            | Self::FlowFailed { seq: s, .. } => *s = seq,
         }
     }
 }

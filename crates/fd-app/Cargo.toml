@@ -8,6 +8,8 @@ description = "FlightdeckOS application host: replay/live CLI"
 [dependencies]
 fd-core = { path = "../fd-core" }
 fd-runtime = { path = "../fd-runtime" }
+fd-aircraft = { path = "../fd-aircraft" }
+fd-sop = { path = "../fd-sop" }
 anyhow.workspace = true
 clap.workspace = true
 

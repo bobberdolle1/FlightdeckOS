@@ -1,0 +1,16 @@
+[package]
+name = "fd-sop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS minimal deterministic SOP/flow engine over validated aircraft packages"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+fd-aircraft = { path = "../fd-aircraft" }
+serde.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.17"

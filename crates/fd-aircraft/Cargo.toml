@@ -1,0 +1,12 @@
+[package]
+name = "fd-aircraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS aircraft package model: versioned manifests, closed state-field registry, typed conditions, crew roles, A32NX action catalog"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+serde.workspace = true
+thiserror.workspace = true
+toml = "0.8"
