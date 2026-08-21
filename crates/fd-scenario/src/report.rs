@@ -1,5 +1,6 @@
 //! Scenario result + machine-checkable report.
 
+use fd_core::capability::CapabilityEntry;
 use serde::{Deserialize, Serialize};
 
 /// Overall scenario verdict.
@@ -32,7 +33,7 @@ pub struct AutonomyMetrics {
 /// Full structured mission/scenario report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioReport {
-    pub capabilities: Vec<(String, String)>,
+    pub capabilities: Vec<CapabilityEntry>,
     /// Explicit proof-domain labels.
     pub headless_virtual_test: bool,
     pub not_live_simulator_validation: bool,
@@ -61,6 +62,9 @@ pub struct FdmEventSummary {
     pub count: u64,
 }
 
+/// `None` stabilization flags mean NOT ASSESSED (gate never crossed inside
+/// the window or required data unknown) — distinct from `Some(false)`
+/// (= assessed AND unstable).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ApproachSummary {
     pub stabilized_at_1000ft: Option<bool>,

@@ -1,0 +1,10 @@
+[package]
+name = "fd-xplane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS X-Plane 12 live simulator adapter (native UDP transport)"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+parking_lot = "0.12"

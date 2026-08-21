@@ -46,12 +46,26 @@ fn generic_unknown_aircraft_completes_without_package() {
         "no SOP steps may exist without a package"
     );
     assert!(report.landing.touchdown_occurred, "must land");
-    let sop_cap = report
+    let sop = report
         .capabilities
         .iter()
-        .find(|(k, _)| k == "procedure.any")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(sop_cap, Some("unavailable"));
+        .find(|c| c.path == "procedure.any")
+        .expect("capability report must contain procedure.any");
+    assert_eq!(sop.status.as_str(), "unavailable");
+    // Virtual-sim proof must never be labeled verified/live.
+    assert_ne!(sop.status.as_str(), "verified");
+    assert_eq!(
+        sop.evidence.as_str(),
+        "virtual_sim",
+        "headless proof provenance must be virtual_sim"
+    );
+    assert!(
+        report
+            .capabilities
+            .iter()
+            .all(|c| c.status.as_str() != "verified"),
+        "a headless run may not claim live-verified capabilities"
+    );
     assert_eq!(report.result, ScenarioResult::Passed);
 }
 

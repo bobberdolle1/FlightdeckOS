@@ -61,6 +61,24 @@ enum Command {
         #[arg(long)]
         package: Option<PathBuf>,
     },
+    /// Live X-Plane 12 session via the native UDP transport.
+    Xplane {
+        /// X-Plane UDP command port (default 49000).
+        #[arg(long, default_value_t = 49000)]
+        port: u16,
+        /// Seconds to monitor telemetry (0 = until Ctrl+C).
+        #[arg(long, default_value_t = 30)]
+        monitor_secs: u64,
+        /// Closed-loop heading smoke: target TRUE heading via stock AP.
+        #[arg(long)]
+        set_heading_true: Option<f64>,
+        /// Closed-loop vertical-speed smoke: target VS in fpm.
+        #[arg(long)]
+        set_vs_fpm: Option<f64>,
+        /// Seconds to wait for the FIRST telemetry packet (XP boot window).
+        #[arg(long, default_value_t = 240)]
+        wait_first_secs: u64,
+    },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
         /// Output trace path (default: ./traces/live.jsonl).
@@ -104,6 +122,19 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Xplane {
+            port,
+            monitor_secs,
+            set_heading_true,
+            set_vs_fpm,
+            wait_first_secs,
+        } => run_xplane_live(
+            port,
+            monitor_secs,
+            set_heading_true,
+            set_vs_fpm,
+            wait_first_secs,
+        ),
         Command::Replay {
             fixture,
             out,
@@ -157,10 +188,17 @@ fn main() -> anyhow::Result<()> {
             } else {
                 println!("fdm events: none");
             }
+            fn fmt_gate(v: &Option<bool>) -> String {
+                match v {
+                    Some(true) => "true".into(),
+                    Some(false) => "false (unstable)".into(),
+                    None => "not_assessed".into(),
+                }
+            }
             println!(
-                "approach: stabilized@1000={:?} @500={:?} max sink={:?} fpm",
-                report.approach.stabilized_at_1000ft,
-                report.approach.stabilized_at_500ft,
+                "approach: stabilized@1000={} @500={} max sink={:?} fpm",
+                fmt_gate(&report.approach.stabilized_at_1000ft),
+                fmt_gate(&report.approach.stabilized_at_500ft),
                 report.approach.max_sink_rate_fpm
             );
             println!(
@@ -186,7 +224,7 @@ fn main() -> anyhow::Result<()> {
             }
             // Compose a capability report for the current configuration.
             let mut r = fd_core::capability::CapabilityReport::new();
-            use fd_core::capability::CapabilityStatus as S;
+            use fd_core::capability::{CapabilityStatus as S, EvidenceSource as E};
             for cap in [
                 "telemetry.position",
                 "telemetry.airspeed",
@@ -197,7 +235,7 @@ fn main() -> anyhow::Result<()> {
                 "qoa.approach",
                 "autonomy.route_guidance",
             ] {
-                r.set(cap, S::Verified);
+                r.set_with_evidence(cap, S::Supported, E::VirtualSim);
             }
             for cap in ["systems.electrical", "systems.pneumatic", "action.lights"] {
                 r.set(cap, if has_pkg { S::Supported } else { S::Unknown });
@@ -226,10 +264,15 @@ fn main() -> anyhow::Result<()> {
                     S::Unavailable
                 },
             );
-            r.set("autonomy.flight", S::Partial);
+            r.set_with_evidence("autonomy.flight", S::Supported, E::VirtualSim);
             r.set("autonomy.ground", S::Unavailable);
-            for (p, st) in r.entries_sorted() {
-                println!("{:<32} {}", p, st.as_str());
+            for e in r.entries_sorted() {
+                println!(
+                    "{:<32} {:<12} {}",
+                    e.path,
+                    e.status.as_str(),
+                    e.evidence.as_str()
+                );
             }
             Ok(())
         }
@@ -574,5 +617,145 @@ fn run_openairac(url: &str, events: bool, identity: Option<&str>) -> anyhow::Res
         println!("  Fresh:    {:?}", snap.freshness);
     }
 
+    Ok(())
+}
+
+/// Live X-Plane 12 smoke: telemetry monitor + optional closed-loop control.
+///
+/// LIVE means LIVE: values shown come only from UDP packets received from a
+/// running X-Plane. When packets stop, the loop prints
+/// SIMULATOR_DISCONNECTED and keeps FlightdeckOS alive, retrying the
+/// subscription (Task 4 §7/§13/§16). No virtual fallback exists on this
+/// path.
+fn run_xplane_live(
+    port: u16,
+    monitor_secs: u64,
+    set_heading_true: Option<f64>,
+    set_vs_fpm: Option<f64>,
+    wait_first_secs: u64,
+) -> anyhow::Result<()> {
+    use fd_core::adapter::{FlightControlTargets, SimulatorAdapter};
+    use fd_xplane::{XPlaneAdapter, XPlaneConfig};
+
+    println!("XPLANE LIVE SMOKE (native UDP transport)");
+    let cfg = XPlaneConfig {
+        host: "127.0.0.1".into(),
+        port,
+        subscribe_hz: 4,
+    };
+    let mut adapter =
+        XPlaneAdapter::new(cfg).map_err(|e| anyhow::anyhow!("adapter init failed: {e}"))?;
+
+    print!("waiting for first telemetry packet from 127.0.0.1:{port} .. ");
+    if !adapter.wait_first_packet(std::time::Duration::from_secs(wait_first_secs)) {
+        return Err(anyhow::anyhow!(
+            "no telemetry from X-Plane within {wait_first_secs} s — is X-Plane 12 running with a flight loaded?"
+        ));
+    }
+    adapter
+        .connect()
+        .map_err(|e| anyhow::anyhow!("connect failed: {e}"))?;
+    println!("CONNECTED");
+    println!(
+        "TRANSPORT_CONNECTED: udp rx {} pkts so far",
+        adapter.packets_received()
+    );
+
+    let mut last_heading_cmd: Option<(f64, std::time::Instant)> = None;
+    let mut last_vs_cmd: Option<(f64, std::time::Instant)> = None;
+    let mut was_connected = true;
+    let started = std::time::Instant::now();
+    let mut last_pkts = 0u64;
+    let mut last_hz_t = started;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Typed disconnect handling: stay alive, expose state, resubscribe.
+        if !adapter.is_connected() {
+            if was_connected {
+                println!("SIMULATOR_DISCONNECTED (telemetry stale > 3 s)");
+                was_connected = false;
+            }
+            let _ = adapter.connect(); // bounded retry: resubscribe + wait 3 s
+            continue;
+        }
+        if !was_connected {
+            println!("SIMULATOR_RECONNECTED — telemetry resumed");
+            was_connected = true;
+        }
+
+        // Closed-loop control smokes fire once telemetry is trusted.
+        if let Some(target) = set_heading_true.filter(|_| last_heading_cmd.is_none()) {
+            let me = &mut adapter as &mut dyn FlightControlTargets;
+            me.set_target_heading(target);
+            last_heading_cmd = Some((target, std::time::Instant::now()));
+            println!("CONTROL_REQUEST: target heading TRUE {target:.1}");
+        }
+        if let Some(vs) = set_vs_fpm.filter(|_| last_vs_cmd.is_none()) {
+            let me = &mut adapter as &mut dyn FlightControlTargets;
+            me.set_target_vertical_speed(vs);
+            last_vs_cmd = Some((vs, std::time::Instant::now()));
+            println!("CONTROL_REQUEST: target VS {vs:.0} fpm");
+        }
+
+        let snap = match adapter.poll() {
+            Ok(v) => v.into_iter().next(),
+            Err(_) => continue,
+        };
+        if let Some(s) = snap {
+            let pos = s.position.as_ref();
+            let hz = {
+                let dt = last_hz_t.elapsed().as_secs_f64().max(1e-6);
+                let hz = (adapter.packets_received() - last_pkts) as f64 / dt;
+                last_pkts = adapter.packets_received();
+                last_hz_t = std::time::Instant::now();
+                hz
+            };
+            println!(
+                "[t={:>5.1}s {:>4.0}Hz] lat={:<10} lon={:<10} msl={:>7.0}ft agl={:>7.0}ft ias={:>6.1} gs={:>6.1} vs={:>7.1} hdg={:>6.1} gnd={} ap={} pkt_age={:?}",
+                started.elapsed().as_secs_f64(),
+                hz,
+                pos.map(|p| format!("{:.5}", p.lat.value()))
+                    .unwrap_or("-".into()),
+                pos.map(|p| format!("{:.5}", p.lon.value()))
+                    .unwrap_or("-".into()),
+                s.altitude_msl.map(|v| v.value()).unwrap_or(0.0),
+                s.altitude_agl.map(|v| v.value()).unwrap_or(0.0),
+                s.indicated_airspeed.map(|v| v.value()).unwrap_or(0.0),
+                s.groundspeed.map(|v| v.value()).unwrap_or(0.0),
+                s.vertical_speed.map(|v| v.value()).unwrap_or(0.0),
+                s.heading_true.map(|v| v.value()).unwrap_or(0.0),
+                s.on_ground.map(|b| b.to_string()).unwrap_or("?".into()),
+                s.autopilot_master.unwrap_or(false),
+                adapter.newest_packet_age(),
+            );
+
+            // Closed-loop reporting: commanded vs observed convergence.
+            if let Some((target, t0)) = last_heading_cmd {
+                let obs = s.heading_true.map(|v| v.value()).unwrap_or(0.0);
+                let err = (target - obs + 180.0).rem_euclid(360.0) - 180.0;
+                let settled = err.abs() < 2.0 && t0.elapsed() >= std::time::Duration::from_secs(3);
+                let timed_out = t0.elapsed() >= std::time::Duration::from_secs(45);
+                if settled || timed_out {
+                    println!(
+                        "CLOSED_LOOP_HEADING_{}: target={target:.1} observed={obs:.1} elapsed={:?} steady_err={err:.2}deg",
+                        if settled { "OK" } else { "TIMEOUT" },
+                        t0.elapsed()
+                    );
+                    last_heading_cmd = None;
+                }
+            }
+        }
+
+        if monitor_secs > 0 && started.elapsed().as_secs() >= monitor_secs {
+            break;
+        }
+    }
+    println!(
+        "SMOKE_END: total_packets={} disconnects={}",
+        adapter.packets_received(),
+        adapter.disconnect_count()
+    );
     Ok(())
 }

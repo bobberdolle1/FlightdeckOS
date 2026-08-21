@@ -58,6 +58,9 @@ measurements, autonomy counters) plus machine-checkable assertions.
 FDM consumes FDR samples through the SAME pipeline later fed from real
 simulators. Development thresholds (sink rate, low-altitude bank, hard
 touchdown) are named, configurable, and explicitly NOT airline policy.
+Development defaults: excessive sink >= 1200 fpm at AGL <= 2500 ft,
+excessive bank >= 30 deg at AGL <= 1500 ft, hard touchdown >= 600 fpm
+(600 is the shipped default; unit tests override thresholds locally).
 Unknown measurements produce unknown metrics — never fabricated events or
 zeros.
 

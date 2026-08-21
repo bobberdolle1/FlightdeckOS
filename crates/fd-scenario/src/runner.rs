@@ -292,8 +292,11 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
     }
 
     // Capability report composition (generic vs profiled).
+    // Task 4 §1-2: headless/virtual proof is NEVER `Verified`. Verified is
+    // reserved for capabilities demonstrated through a live adapter.
     let mut caps = fd_core::capability::CapabilityReport::new();
-    use fd_core::capability::CapabilityStatus as Cap;
+    use fd_core::capability::{CapabilityStatus as Cap, EvidenceSource as Ev};
+    let sim_ev = Ev::VirtualSim;
     for cap in [
         "telemetry.position",
         "telemetry.airspeed",
@@ -305,7 +308,7 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         "qoa.approach",
         "autonomy.route_guidance",
     ] {
-        caps.set(cap, Cap::Verified);
+        caps.set_with_evidence(cap, Cap::Supported, sim_ev);
     }
     for cap in [
         "systems.electrical",
@@ -317,30 +320,28 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         "autonomy.sop",
     ] {
         if validated_package.is_some() {
-            // Supported by package definitions; live behavior still unproven.
-            caps.set(cap, Cap::Supported);
+            caps.set_with_evidence(cap, Cap::Supported, sim_ev);
         } else {
             // No package: SOP/system knowledge is UNAVAILABLE — never guessed.
-            caps.set(cap, Cap::Unavailable);
+            caps.set_with_evidence(cap, Cap::Unavailable, sim_ev);
         }
     }
-    caps.set(
+    caps.set_with_evidence(
         "action.apu",
         if validated_package.is_some() {
             Cap::Supported
         } else {
             Cap::Unsupported
         },
+        sim_ev,
     );
-    caps.set("autonomy.flight", Cap::Partial);
-    caps.set("autonomy.ground", Cap::Unavailable);
+    // Route guidance is implemented and virtual-proven; LIVE flight control
+    // remains unproven until demonstrated through a real adapter.
+    caps.set_with_evidence("autonomy.flight", Cap::Supported, sim_ev);
+    caps.set_with_evidence("autonomy.ground", Cap::Unavailable, sim_ev);
 
     Ok(ScenarioReport {
-        capabilities: caps
-            .entries_sorted()
-            .into_iter()
-            .map(|(k, v)| (k, v.as_str().to_string()))
-            .collect(),
+        capabilities: caps.entries_sorted(),
         headless_virtual_test: true,
         not_live_simulator_validation: true,
         not_real_aircraft_performance_validation: true,

@@ -11,6 +11,7 @@ fd-runtime = { path = "../fd-runtime" }
 fd-aircraft = { path = "../fd-aircraft" }
 fd-sop = { path = "../fd-sop" }
 fd-scenario = { path = "../fd-scenario" }
+fd-xplane = { path = "../fd-xplane" }
 fd-openairac = { path = "../fd-openairac" }
 fd-crew = { path = "../fd-crew" }
 anyhow.workspace = true

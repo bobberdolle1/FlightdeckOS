@@ -8,6 +8,7 @@ members = [
     "crates/fd-virtual",
     "crates/fd-mission",
     "crates/fd-scenario",
+    "crates/fd-xplane",
     "crates/fd-simconnect",
     "crates/fd-runtime",
     "crates/fd-app",
