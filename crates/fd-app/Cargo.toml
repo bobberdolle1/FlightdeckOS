@@ -10,6 +10,8 @@ fd-core = { path = "../fd-core" }
 fd-runtime = { path = "../fd-runtime" }
 fd-aircraft = { path = "../fd-aircraft" }
 fd-sop = { path = "../fd-sop" }
+fd-openairac = { path = "../fd-openairac" }
+fd-crew = { path = "../fd-crew" }
 anyhow.workspace = true
 clap.workspace = true
 

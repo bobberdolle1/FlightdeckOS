@@ -57,6 +57,26 @@ pub enum AdapterError {
     PollTimeout,
 }
 
+/// High-level flight-control target surface (AP/FMS-style commands).
+///
+/// Implemented by simulators that can follow targets (the virtual
+/// simulator; future X-Plane/MSFS adapters via their autopilot). This is
+/// deliberately SEPARATE from [`SimulatorAdapter`]: discrete cockpit
+/// actions and continuous flight guidance are different capability
+/// families, and an adapter may support one without the other.
+///
+/// Targets are COMMANDS, not teleports: the aircraft model moves toward
+/// them with bounded rates.
+pub trait FlightControlTargets {
+    /// Report whether continuous flight guidance is supported.
+    fn flight_guidance_supported(&self) -> bool;
+    fn set_target_altitude(&mut self, altitude_ft: f64);
+    fn set_target_speed(&mut self, speed_kt: f64);
+    fn set_target_heading(&mut self, heading_deg: f64);
+    /// Vertical mode: climb/descent rate limit toward the target altitude.
+    fn set_target_vertical_speed(&mut self, fpm: f64);
+}
+
 /// Minimal simulator abstraction boundary for the Task 1 runtime.
 ///
 /// Capability categories (Task 1 §7): connect/disconnect, read state,

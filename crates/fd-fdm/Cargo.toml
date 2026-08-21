@@ -1,0 +1,13 @@
+[package]
+name = "fd-fdm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS flight-data layer: FDR recorder, development-grade FDM events, Quality of Approach / Quality of Landing metrics"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

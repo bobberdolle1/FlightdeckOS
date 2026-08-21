@@ -1,0 +1,14 @@
+[package]
+name = "fd-crew"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+fd-aircraft = { path = "../fd-aircraft" }
+fd-sop = { path = "../fd-sop" }
+fd-openairac = { path = "../fd-openairac" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

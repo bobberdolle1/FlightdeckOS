@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::session::SessionId;
 
 /// Trace format version. Readers must reject unknown versions (fail-closed).
-/// Task 2: added SOP Flow*/Step* event kinds (deliberate version bump;
-/// readers of the old schema must fail closed).
-pub const TRACE_VERSION: u8 = 2;
+/// Task 2: SOP Flow*/Step* event kinds. Task 3: MissionPhaseChanged
+/// (deliberate version bumps; readers of older schemas must fail closed).
+pub const TRACE_VERSION: u8 = 3;
 
 /// A version tag wrapper; readers check this before interpreting a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +150,22 @@ pub enum TraceEvent {
         ts: SimTimestamp,
         flow: String,
     },
+    MissionPhaseChanged {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        from: String,
+        to: String,
+        detail: String,
+    },
+    MissionCompleted {
+        seq: EventSeq,
+        ts: SimTimestamp,
+    },
+    MissionFailed {
+        seq: EventSeq,
+        ts: SimTimestamp,
+        reason: String,
+    },
 }
 
 /// A single trace line: `{"v": 1, <event fields...>}`.
@@ -239,7 +255,10 @@ impl TraceEvent {
             | Self::StepVerified { seq, .. }
             | Self::StepFailed { seq, .. }
             | Self::FlowCompleted { seq, .. }
-            | Self::FlowFailed { seq, .. } => *seq,
+            | Self::FlowFailed { seq, .. }
+            | Self::MissionPhaseChanged { seq, .. }
+            | Self::MissionCompleted { seq, .. }
+            | Self::MissionFailed { seq, .. } => *seq,
         }
     }
 
@@ -265,6 +284,9 @@ impl TraceEvent {
             Self::StepFailed { .. } => "step_failed",
             Self::FlowCompleted { .. } => "flow_completed",
             Self::FlowFailed { .. } => "flow_failed",
+            Self::MissionPhaseChanged { .. } => "mission_phase_changed",
+            Self::MissionCompleted { .. } => "mission_completed",
+            Self::MissionFailed { .. } => "mission_failed",
         }
     }
 
@@ -291,6 +313,9 @@ impl TraceEvent {
             | Self::StepFailed { seq: s, .. }
             | Self::FlowCompleted { seq: s, .. }
             | Self::FlowFailed { seq: s, .. } => *s = seq,
+            Self::MissionPhaseChanged { seq: s, .. }
+            | Self::MissionCompleted { seq: s, .. }
+            | Self::MissionFailed { seq: s, .. } => *s = seq,
         }
     }
 }

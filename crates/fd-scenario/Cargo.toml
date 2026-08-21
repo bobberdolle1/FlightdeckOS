@@ -1,0 +1,19 @@
+[package]
+name = "fd-scenario"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS scenario engine: TOML scenarios, headless runner over the virtual simulator, assertions and mission reports"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+fd-runtime = { path = "../fd-runtime" }
+fd-aircraft = { path = "../fd-aircraft" }
+fd-sop = { path = "../fd-sop" }
+fd-virtual = { path = "../fd-virtual" }
+fd-mission = { path = "../fd-mission" }
+fd-fdm = { path = "../fd-fdm" }
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml = "0.8"

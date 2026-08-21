@@ -440,6 +440,9 @@ mod tests {
                 | TraceEvent::StepFailed { .. }
                 | TraceEvent::FlowCompleted { .. }
                 | TraceEvent::FlowFailed { .. } => "sop",
+                TraceEvent::MissionPhaseChanged { .. }
+                | TraceEvent::MissionCompleted { .. }
+                | TraceEvent::MissionFailed { .. } => "mission",
             })
             .collect();
         // NOTE: the FIRST snapshot produces no delta (nothing to diff

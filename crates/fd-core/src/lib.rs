@@ -13,8 +13,10 @@
 
 pub mod actions;
 pub mod adapter;
+pub mod capability;
 pub mod delta;
 pub mod events;
+pub mod geo;
 pub mod phase;
 pub mod telemetry;
 pub mod units;

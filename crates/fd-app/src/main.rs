@@ -63,6 +63,30 @@ enum Command {
     },
     /// Print the A32NX action binding table with provenance.
     Bindings,
+    /// Connect to OpenAIRAC Gateway and interact with AI Crew Runtime.
+    Crew {
+        /// OpenAIRAC Gateway URL (default: http://127.0.0.1:8989/api/openairac/v1).
+        #[arg(long, default_value = "http://127.0.0.1:8989/api/openairac/v1")]
+        url: String,
+        /// Ask a natural language question to the AI Crew.
+        #[arg(long, short)]
+        ask: Option<String>,
+        /// Display structured crew flight status panel.
+        #[arg(long)]
+        status: bool,
+    },
+    /// Query OpenAIRAC Gateway directly.
+    Openairac {
+        /// OpenAIRAC Gateway URL.
+        #[arg(long, default_value = "http://127.0.0.1:8989/api/openairac/v1")]
+        url: String,
+        /// Fetch recent flight events.
+        #[arg(long)]
+        events: bool,
+        /// Resolve airport multi-identity (e.g. URAS, URFF).
+        #[arg(long)]
+        identity: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,6 +116,12 @@ fn main() -> anyhow::Result<()> {
             print_bindings();
             Ok(())
         }
+        Command::Crew { url, ask, status } => run_crew(&url, ask.as_deref(), status),
+        Command::Openairac {
+            url,
+            events,
+            identity,
+        } => run_openairac(&url, events, identity.as_deref()),
     }
 }
 
@@ -304,4 +334,124 @@ fn print_bindings() {
             "binding table is available on Windows builds only (fd-simconnect is Windows-gated)"
         );
     }
+}
+
+fn run_crew(url: &str, ask: Option<&str>, show_status: bool) -> anyhow::Result<()> {
+    use fd_crew::AiCrewRuntime;
+    use fd_openairac::OpenAiracClient;
+
+    println!("================================================================================");
+    println!("FlightdeckOS v0.2 — AI Crew Runtime & OpenAIRAC Integration");
+    println!("================================================================================");
+    println!("Connecting to OpenAIRAC Gateway at {}...", url);
+
+    let client = OpenAiracClient::new(url);
+    let mut crew = AiCrewRuntime::default();
+
+    match client.get_snapshot() {
+        Ok(snap) => {
+            println!(
+                "[+] Connected to OpenAIRAC Gateway successfully (Schema: {})",
+                snap.schema_version
+            );
+            crew.update_from_snapshot(&snap);
+
+            if let Some(ctx) = crew.context() {
+                if show_status || ask.is_none() {
+                    println!(
+                        "\n┌── CREW FLIGHT STATUS PANEL ───────────────────────────────────────────────────┐"
+                    );
+                    println!(
+                        "│ Flight: {:<12} Phase: {:<14} Aircraft: {:<25}│",
+                        ctx.flight_id, ctx.flight_phase, ctx.aircraft_type
+                    );
+                    println!(
+                        "│ Alt: {:<6.0} ft MSL  GS: {:<5.0} kt   Track: {:<5.0}°   XTK: {:<4.2} NM {:<12}│",
+                        ctx.altitude_ft,
+                        ctx.groundspeed_kts,
+                        ctx.track_deg,
+                        ctx.xtk_nm,
+                        ctx.xtk_side
+                    );
+                    println!("│ Active Leg: {:<64}│", ctx.active_leg);
+                    println!(
+                        "│ Next Fix: {:<14} Distance: {:<5.1} NM   Next Constraint: {:<16}│",
+                        ctx.next_fix, ctx.distance_to_next_nm, ctx.next_constraint
+                    );
+                    println!(
+                        "│ TOD Distance: {:<10} Profile Status: {:<37}│",
+                        ctx.tod_distance_nm
+                            .map(|d| format!("{:.1} NM", d))
+                            .unwrap_or_else(|| "N/A".to_string()),
+                        ctx.descent_profile_status
+                    );
+                    println!("│ Weather: {:<67}│", ctx.destination_weather);
+                    println!(
+                        "│ Freshness: Telem={:<7} Wx={:<7} Online={:<7} Nav={:<14}│",
+                        ctx.freshness.telemetry_status,
+                        ctx.freshness.weather_status,
+                        ctx.freshness.online_atc_status,
+                        ctx.freshness.navdata_status
+                    );
+                    println!(
+                        "└───────────────────────────────────────────────────────────────────────────────┘"
+                    );
+                }
+
+                if let Some(q) = ask {
+                    println!("\n[User]: {}", q);
+                    let resp = crew.ask(q)?;
+                    println!("[AI Crew]: {}", resp.message);
+                    if let Some(qual) = resp.freshness_qualification {
+                        println!("  ⚠️ Freshness Notice: {}", qual);
+                    }
+                    println!(
+                        "  🔍 Tool Evidence: {} factual source traces",
+                        resp.tool_evidence.len()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            println!("[-] OpenAIRAC Gateway connection notice: {e}");
+            println!(
+                "[*] FlightdeckOS failure isolation active: SOP and aircraft runtime remain operational."
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_openairac(url: &str, events: bool, identity: Option<&str>) -> anyhow::Result<()> {
+    use fd_openairac::OpenAiracClient;
+    let client = OpenAiracClient::new(url);
+
+    if events {
+        let evts = client.get_events(None)?;
+        println!("Received {} OpenAIRAC flight events:", evts.len());
+        for e in evts {
+            println!("  [{:>4}] {} — {}", e.id, e.event_type, e.description);
+        }
+    } else if let Some(ident) = identity {
+        let id = client.resolve_identity(ident)?;
+        println!("Airport Multi-Identity Resolution for {}:", ident);
+        println!("  Authoritative Ident: {}", id.authoritative_ident);
+        println!("  IATA Code:           {:?}", id.iata_code);
+        println!("  Airport Name:        {}", id.airport_name);
+        println!("  Primary Provider:    {}", id.primary_provider);
+        println!("  Procedures Status:   {}", id.terminal_procedures_status);
+    } else {
+        let snap = client.get_compact_snapshot()?;
+        println!("OpenAIRAC Compact AI Snapshot:");
+        println!("  Flight:   {}", snap.flight);
+        println!("  Phase:    {}", snap.phase);
+        println!("  Leg:      {}", snap.active_leg);
+        println!("  Next:     {}", snap.next_fix);
+        println!("  TOD:      {}", snap.tod);
+        println!("  Arrival:  {}", snap.arrival);
+        println!("  Fresh:    {:?}", snap.freshness);
+    }
+
+    Ok(())
 }

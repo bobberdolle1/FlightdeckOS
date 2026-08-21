@@ -4,9 +4,15 @@ members = [
     "crates/fd-core",
     "crates/fd-aircraft",
     "crates/fd-sop",
+    "crates/fd-fdm",
+    "crates/fd-virtual",
+    "crates/fd-mission",
+    "crates/fd-scenario",
     "crates/fd-simconnect",
     "crates/fd-runtime",
     "crates/fd-app",
+    "crates/fd-openairac",
+    "crates/fd-crew",
 ]
 
 [workspace.package]

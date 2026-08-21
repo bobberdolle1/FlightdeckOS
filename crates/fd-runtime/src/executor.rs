@@ -602,7 +602,10 @@ mod tests {
             | TraceEvent::StepVerified { .. }
             | TraceEvent::StepFailed { .. }
             | TraceEvent::FlowCompleted { .. }
-            | TraceEvent::FlowFailed { .. } => "sop",
+            | TraceEvent::FlowFailed { .. }
+            | TraceEvent::MissionPhaseChanged { .. }
+            | TraceEvent::MissionCompleted { .. }
+            | TraceEvent::MissionFailed { .. } => "mission",
         }
     }
 

@@ -1,0 +1,10 @@
+[package]
+name = "fd-mission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS deterministic mission controller and route follower (simulator-independent)"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+serde.workspace = true
