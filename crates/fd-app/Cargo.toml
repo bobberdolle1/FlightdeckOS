@@ -1,0 +1,15 @@
+[package]
+name = "fd-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS application host: replay/live CLI"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+fd-runtime = { path = "../fd-runtime" }
+anyhow.workspace = true
+clap.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+fd-simconnect = { path = "../fd-simconnect" }

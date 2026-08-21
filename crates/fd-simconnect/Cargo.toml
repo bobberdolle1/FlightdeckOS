@@ -1,0 +1,10 @@
+[package]
+name = "fd-simconnect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FlightdeckOS SimConnect adapter (MSFS): own minimal FFI with runtime DLL loading, A32NX binding table, closed-action writes"
+
+[dependencies]
+fd-core = { path = "../fd-core" }
+thiserror.workspace = true

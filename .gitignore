@@ -1,0 +1,11 @@
+# Build artifacts
+/target
+
+# Runtime traces (append-only logs produced by fd-app)
+/traces
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
