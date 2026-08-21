@@ -71,6 +71,9 @@ pub struct CrewFlightContext {
     pub profile_deviation_ft: Option<f64>,
     pub departure_brief_text: String,
     pub arrival_brief_text: String,
+    pub star_procedure: Option<String>,
+    pub approach_procedure: Option<String>,
+    pub approach_type: Option<String>,
     pub is_source_required_at_destination: bool,
     pub destination_weather: String,
     pub online_atc: Vec<String>,
@@ -131,11 +134,11 @@ impl CrewFlightContext {
                     .as_deref()
                     .unwrap_or("DEFAULT"),
                 snap.destination
-                    .procedure_name
+                    .star_procedure
                     .as_deref()
                     .unwrap_or("DIRECT"),
                 snap.destination
-                    .procedure_name
+                    .approach_procedure
                     .as_deref()
                     .unwrap_or("VISUAL")
             )
@@ -205,6 +208,9 @@ impl CrewFlightContext {
             profile_deviation_ft: dprof.profile_deviation_ft,
             departure_brief_text,
             arrival_brief_text,
+            star_procedure: snap.destination.star_procedure.clone(),
+            approach_procedure: snap.destination.approach_procedure.clone(),
+            approach_type: snap.destination.approach_type.clone(),
             is_source_required_at_destination: snap.destination.is_source_required,
             destination_weather,
             online_atc,
@@ -260,6 +266,9 @@ impl CrewFlightContext {
             profile_deviation_ft: None,
             departure_brief_text: format!("Departure from {origin}."),
             arrival_brief_text: compact.arrival.clone(),
+            star_procedure: None,
+            approach_procedure: None,
+            approach_type: None,
             is_source_required_at_destination: is_source_req,
             destination_weather: compact.destination_weather.clone(),
             online_atc: compact.online_atc.clone(),

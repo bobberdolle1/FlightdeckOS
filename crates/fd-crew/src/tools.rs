@@ -89,6 +89,11 @@ impl CrewToolRegistry {
                 description: "Get multi-source freshness statuses for telemetry, weather, online ATC, and navdata.".to_string(),
                 parameters: serde_json::json!({ "type": "object", "properties": {} }),
             },
+            CrewToolDefinition {
+                name: "get_sop_state".to_string(),
+                description: "Get active SOP checklist flow, step status, and aircraft compatibility.".to_string(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -174,6 +179,9 @@ impl CrewToolRegistry {
             "get_arrival_brief" => {
                 let payload = serde_json::json!({
                     "destination": context.destination_icao,
+                    "star": context.star_procedure,
+                    "approach": context.approach_procedure,
+                    "approach_type": context.approach_type,
                     "arrival_brief": context.arrival_brief_text,
                     "is_source_required": context.is_source_required_at_destination,
                     "weather": context.destination_weather,
@@ -242,6 +250,20 @@ impl CrewToolRegistry {
                     tool_name: tool_name.to_string(),
                     timestamp_utc: now_str,
                     source_subsystem: "OpenAIRAC Crew Advisory Engine".to_string(),
+                    freshness_status: "CURRENT".to_string(),
+                    factual_payload: payload.clone(),
+                };
+                (payload, evidence)
+            }
+            "get_sop_state" => {
+                let sop_status =
+                    crate::sop_binding::SopAircraftBinding::evaluate(&context.aircraft_type, None);
+                let payload = serde_json::to_value(&sop_status)
+                    .unwrap_or(serde_json::json!({ "status": "NOT_INSTALLED" }));
+                let evidence = ToolEvidence {
+                    tool_name: tool_name.to_string(),
+                    timestamp_utc: now_str,
+                    source_subsystem: "FlightdeckOS SOP Engine (fd-sop)".to_string(),
                     freshness_status: "CURRENT".to_string(),
                     factual_payload: payload.clone(),
                 };

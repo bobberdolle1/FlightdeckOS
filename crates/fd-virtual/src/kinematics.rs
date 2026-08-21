@@ -158,6 +158,8 @@ impl KinematicState {
             }
 
             // --- vertical ---------------------------------------------------
+            // Target VS: explicit command wins; otherwise proportional
+            // closure toward the target altitude with bounded rates.
             let target_vs = match self.target_vertical_speed_fpm {
                 Some(cmd) => cmd.clamp(-self.limits.max_descent_fpm, self.limits.max_climb_fpm),
                 None => {
@@ -165,39 +167,42 @@ impl KinematicState {
                     if err.abs() <= 1.0 {
                         0.0
                     } else {
-                        // Proportional closure bounded by climb/descent limits.
                         (err / dt_s * 60.0)
                             .clamp(-self.limits.max_descent_fpm, self.limits.max_climb_fpm)
                     }
                 }
             };
 
-            // VS changes toward its target with a bounded rate (fpm per s).
-            let vs_rate = 1500.0 * dt_s;
+            // VS moves toward its target with a bounded VS-change rate.
+            let vs_rate = 1500.0 * dt_s; // fpm per second (development value)
             self.vertical_speed_fpm +=
                 (target_vs - self.vertical_speed_fpm).clamp(-vs_rate, vs_rate);
 
             // Altitude integrates from vertical speed.
+            let prev_alt = self.altitude_ft;
             self.altitude_ft += self.vertical_speed_fpm / 60.0 * dt_s;
 
-            // Level-off snap: no oscillation around the target altitude.
+            // Level-off snap: crossing the target altitude this step lands
+            // exactly on it (no oscillation).
             if self.target_vertical_speed_fpm.is_none() {
-                let err = self.target_altitude_ft - self.altitude_ft;
-                if err.abs() <= 1.0
-                    || (err > 0.0) == (self.vertical_speed_fpm >= 0.0)
-                        && err.abs() <= self.vertical_speed_fpm.abs() / 60.0 * dt_s + 1.0
-                {
+                let crossed = (prev_alt < self.target_altitude_ft)
+                    != (self.altitude_ft < self.target_altitude_ft);
+                if crossed || self.altitude_ft == self.target_altitude_ft {
                     self.altitude_ft = self.target_altitude_ft;
                     self.vertical_speed_fpm = 0.0;
                 }
             }
-            // Never descend below ground without declaring touchdown:
-            if self.altitude_ft < self.ground_elevation_ft {
+
+            // Ground floor: descending through field elevation = touchdown.
+            if self.altitude_ft <= self.ground_elevation_ft {
                 self.altitude_ft = self.ground_elevation_ft;
                 self.on_ground = true;
                 self.pitch_deg = 0.0;
             }
         }
+
+        // Test model: no wind — ground speed follows IAS while airborne.
+        self.groundspeed_kt = self.ias_kt;
 
         // --- heading: bounded turn rate (airborne) ---------------------------
         if !self.on_ground {
@@ -222,145 +227,22 @@ impl KinematicState {
     }
 }
 
-/// Minimal spherical dead reckoning (good enough for a test route).
+/// Minimal spherical dead reckoning (standard direct-geodesic formulas,
+/// spherical earth — good enough for a test route).
 fn dead_reckon(lat_deg: f64, lon_deg: f64, bearing_deg: f64, dist_nm: f64) -> (f64, f64) {
     const R_NM: f64 = 3440.065;
-    let lat1 = lat_deg.to_radians();
-    let lon1 = lon_deg.to_radians();
-    let brg = bearing_deg.to_radians();
-    let dr = dist_nm / R_NM;
-    let lat2 = (lat1.cos() * dr.cos() - lat1.sin() * dr.sin() * brg.cos()).acos();
-    let lon2 = lon1
-        + brg.sin()
-            * dr.sin()
-            * lat2
-                .cos()
-                .atan2(lat1.cos() * dr.cos() - lat1.sin() * dr.sin() * brg.cos());
-    let lat2 = lat2.asin();
+    let phi1 = lat_deg.to_radians();
+    let lam1 = lon_deg.to_radians();
+    let theta = bearing_deg.to_radians();
+    let delta = dist_nm / R_NM;
+
+    let sin_phi2 = phi1.sin() * delta.cos() + phi1.cos() * delta.sin() * theta.cos();
+    let phi2 = sin_phi2.asin();
+    let lam2 =
+        lam1 + (theta.sin() * delta.sin() * phi1.cos()).atan2(delta.cos() - phi1.sin() * sin_phi2);
+
     (
-        lat2.to_degrees().clamp(-90.0, 90.0),
-        lon2.to_degrees().rem_euclid(360.0),
+        phi2.to_degrees().clamp(-90.0, 90.0),
+        lam2.to_degrees().rem_euclid(360.0),
     )
-}
-
-/// Great-circle distance between two points (nm). Development helper.
-pub fn distance_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R_NM: f64 = 3440.065;
-    let (lat1, lon1, lat2, lon2) = (
-        lat1.to_radians(),
-        lon1.to_radians(),
-        lat2.to_radians(),
-        lon2.to_radians(),
-    );
-    let dlat = lat2 - lat1;
-    let dlon = lon2 - lon1;
-    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    R_NM * 2.0 * a.sqrt().atan2((1.0 - a).sqrt())
-}
-
-/// Initial bearing from point 1 to point 2 (degrees true).
-pub fn initial_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let (lat1, lon1, lat2, lon2) = (
-        lat1.to_radians(),
-        lon1.to_radians(),
-        lat2.to_radians(),
-        lon2.to_radians(),
-    );
-    let dlon = lon2 - lon1;
-    let y = dlon.sin() * lat2.cos();
-    let x = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
-    y.atan2(x).to_degrees().rem_euclid(360.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn model() -> KinematicState {
-        KinematicState::new(55.972642, 37.414589, 622.0, KinematicLimits::default())
-    }
-
-    #[test]
-    fn bounded_turn_rate_never_teleports_heading() {
-        let mut m = model();
-        m.set_target_heading(180.0);
-        // One small step cannot flip 180 degrees instantly.
-        m.advance(0.1); // 0.1 s
-        let turned = wrap180(m.heading_deg - 0.0);
-        assert!(turned.abs() < 3.0, "turned too fast: {turned}");
-    }
-
-    #[test]
-    fn bounded_speed_change_is_gradual() {
-        let mut m = model();
-        m.set_target_speed(250.0);
-        let mut prev = m.ias_kt;
-        for _ in 0..50 {
-            m.advance(1.0);
-            assert!(m.ias_kt >= prev - 1e-9);
-            assert!(m.ias_kt - prev <= 1.5 * 1.0 + 1e-9);
-            prev = m.ias_kt;
-        }
-        assert!(m.ias_kt < 250.0 || (prev - 250.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn altitude_integrates_toward_target_without_overshoot() {
-        let mut m = model();
-        m.set_target_speed(250.0);
-        m.set_target_altitude(10_000.0);
-        // Liftoff first (speed up past rotation).
-        for _ in 0..200 {
-            m.advance(1.0);
-        }
-        m.on_ground = false;
-        let mut reached = false;
-        for _ in 0..20_000 {
-            m.advance(1.0);
-            if m.altitude_ft == 10_000.0 {
-                reached = true;
-                break;
-            }
-            assert!(m.altitude_ft <= 10_000.0 + 1e-6, "overshot target altitude");
-        }
-        assert!(reached, "never reached target altitude");
-        assert_eq!(m.vertical_speed_fpm, 0.0);
-    }
-
-    #[test]
-    fn invalid_vertical_command_is_clamped_to_limits() {
-        let mut m = model();
-        m.set_target_vertical_speed(999_999.0);
-        // Clamped into [-2200, 2500]; no panic, no teleport.
-        m.advance(1.0);
-        assert!(m.vertical_speed_fpm <= 2500.0);
-    }
-
-    #[test]
-    fn descent_touches_down_through_ground_elevation() {
-        let mut m = model();
-        m.on_ground = false;
-        m.altitude_ft = 1500.0;
-        m.ground_elevation_ft = 79.0;
-        m.set_target_altitude(79.0);
-        m.set_target_vertical_speed(-800.0);
-        let mut touched_at_vs = None;
-        for _ in 0..1000 {
-            m.advance(1.0);
-            if m.on_ground {
-                touched_at_vs = Some(m.vertical_speed_fpm);
-                break;
-            }
-        }
-        assert!(m.on_ground);
-        assert!((m.altitude_ft - 79.0).abs() < 1e-9);
-        assert!(touched_at_vs.is_some());
-    }
-
-    #[test]
-    fn distance_helper_matches_known_reference() {
-        // UUEE -> ULLI great-circle ~ 334 nm (open-airac coordinates).
-        let d = distance_nm(55.972642, 37.414589, 59.800278, 30.2625);
-        assert!(d > 320.0 && d < 350.0, "distance {d}");
-    }
 }

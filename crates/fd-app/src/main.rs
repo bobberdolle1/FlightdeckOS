@@ -49,6 +49,18 @@ enum Command {
         #[arg(long)]
         dir: PathBuf,
     },
+    /// Run a deterministic headless scenario (virtual simulator).
+    Scenario {
+        /// Scenario TOML path.
+        #[arg(long)]
+        run: PathBuf,
+    },
+    /// Print the capability report for an optional package.
+    Capabilities {
+        /// Optional package directory; omit for generic mode.
+        #[arg(long)]
+        package: Option<PathBuf>,
+    },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
         /// Output trace path (default: ./traces/live.jsonl).
@@ -112,6 +124,115 @@ fn main() -> anyhow::Result<()> {
             interval_ms,
         } => run_live(out, max_ticks, interval_ms),
         Command::Package { dir } => run_package_validate(&dir),
+        Command::Scenario { run } => {
+            let report = fd_scenario::run_scenario(&run).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("HEADLESS VIRTUAL TEST");
+            println!("NOT LIVE SIMULATOR VALIDATION");
+            println!("NOT REAL AIRCRAFT PERFORMANCE VALIDATION");
+            println!(
+                "scenario: {}  route: {} -> {}",
+                report.scenario_id, report.origin_id, report.destination_id
+            );
+            println!(
+                "simulated: {:.1}s  wall: {:.2}s  ticks: {}  fdr samples: {}",
+                report.simulated_seconds, report.wall_seconds, report.sim_ticks, report.fdr_samples
+            );
+            println!("final phase: {}", report.final_phase);
+            println!(
+                "autonomy: requested={} verified={} failed={} timed_out={}",
+                report.autonomy.actions_requested,
+                report.autonomy.actions_verified,
+                report.autonomy.actions_failed,
+                report.autonomy.actions_timed_out
+            );
+            println!(
+                "procedures: completed={} failed={}",
+                report.autonomy.procedure_steps_completed, report.autonomy.procedure_steps_failed
+            );
+            if !report.fdm_events.is_empty() {
+                println!("fdm events:");
+                for e in &report.fdm_events {
+                    println!("  {}: {}", e.kind, e.count);
+                }
+            } else {
+                println!("fdm events: none");
+            }
+            println!(
+                "approach: stabilized@1000={:?} @500={:?} max sink={:?} fpm",
+                report.approach.stabilized_at_1000ft,
+                report.approach.stabilized_at_500ft,
+                report.approach.max_sink_rate_fpm
+            );
+            println!(
+                "landing: touchdown={} vs={:?}",
+                report.landing.touchdown_occurred, report.landing.touchdown_vertical_speed_fpm
+            );
+            match &report.result {
+                fd_scenario::ScenarioResult::Passed => println!("RESULT: PASSED"),
+                fd_scenario::ScenarioResult::Failed { reason } => {
+                    println!("RESULT: FAILED — {reason}")
+                }
+            }
+            Ok(())
+        }
+        Command::Capabilities { package } => {
+            let has_pkg = package.is_some();
+            if let Some(dir) = &package {
+                let pkg = load_package(dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!(
+                    "package: {} ({})",
+                    pkg.manifest.package_id, pkg.manifest.display_name
+                );
+            }
+            // Compose a capability report for the current configuration.
+            let mut r = fd_core::capability::CapabilityReport::new();
+            use fd_core::capability::CapabilityStatus as S;
+            for cap in [
+                "telemetry.position",
+                "telemetry.airspeed",
+                "telemetry.attitude",
+                "telemetry.gear",
+                "fdr.recording",
+                "fdm.analysis",
+                "qoa.approach",
+                "autonomy.route_guidance",
+            ] {
+                r.set(cap, S::Verified);
+            }
+            for cap in ["systems.electrical", "systems.pneumatic", "action.lights"] {
+                r.set(cap, if has_pkg { S::Supported } else { S::Unknown });
+            }
+            r.set(
+                "action.apu",
+                if has_pkg {
+                    S::Supported
+                } else {
+                    S::Unsupported
+                },
+            );
+            r.set(
+                "procedure.before_start",
+                if has_pkg {
+                    S::Supported
+                } else {
+                    S::Unavailable
+                },
+            );
+            r.set(
+                "procedure.any",
+                if has_pkg {
+                    S::Supported
+                } else {
+                    S::Unavailable
+                },
+            );
+            r.set("autonomy.flight", S::Partial);
+            r.set("autonomy.ground", S::Unavailable);
+            for (p, st) in r.entries_sorted() {
+                println!("{:<32} {}", p, st.as_str());
+            }
+            Ok(())
+        }
         Command::Bindings => {
             print_bindings();
             Ok(())

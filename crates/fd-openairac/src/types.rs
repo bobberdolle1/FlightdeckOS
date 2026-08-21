@@ -37,6 +37,10 @@ pub struct OpenAiracAirportBrief {
     pub elevation_ft: Option<f64>,
     pub selected_runway: Option<String>,
     pub procedure_name: Option<String>,
+    pub sid_procedure: Option<String>,
+    pub star_procedure: Option<String>,
+    pub approach_procedure: Option<String>,
+    pub approach_type: Option<String>,
     pub transition_name: Option<String>,
     #[serde(default)]
     pub initial_or_final_restrictions: Vec<String>,

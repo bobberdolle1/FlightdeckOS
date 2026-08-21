@@ -230,6 +230,7 @@ dependencies = [
  "fd-crew",
  "fd-openairac",
  "fd-runtime",
+ "fd-scenario",
  "fd-simconnect",
  "fd-sop",
 ]

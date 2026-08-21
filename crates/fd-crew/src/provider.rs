@@ -153,10 +153,21 @@ impl AiModelProvider for DeterministicAiProvider {
                     context.destination_icao
                 )
             } else {
+                let star_str = context.star_procedure.as_deref().unwrap_or("DIRECT");
+                let app_str = context.approach_procedure.as_deref().unwrap_or("VISUAL");
                 format!(
-                    "Arrival briefing for {}: {}. Weather: {}.",
+                    "Arrival briefing for {}: Arrival at {} (Elev {:.0} ft), Runway {}, STAR {}, Approach {}. Weather: {}.",
                     context.destination_icao,
-                    context.arrival_brief_text,
+                    context.destination_icao,
+                    context.altitude_ft,
+                    context
+                        .arrival_brief_text
+                        .split("Runway ")
+                        .nth(1)
+                        .and_then(|s| s.split(',').next())
+                        .unwrap_or("DEFAULT"),
+                    star_str,
+                    app_str,
                     context.destination_weather
                 )
             }
@@ -191,6 +202,35 @@ impl AiModelProvider for DeterministicAiProvider {
                 context.freshness.online_atc_status,
                 context.freshness.navdata_status
             )
+        } else if q.contains("checklist")
+            || q.contains("sop")
+            || q.contains("what do we need to do")
+        {
+            let (_, ev) = CrewToolRegistry::execute_tool("get_sop_state", context);
+            evidence.push(ev);
+            let sop_status =
+                crate::sop_binding::SopAircraftBinding::evaluate(&context.aircraft_type, None);
+            match sop_status {
+                crate::sop_binding::SopBindingStatus::Active {
+                    current_flow,
+                    pending_steps_count,
+                    ..
+                } => {
+                    format!(
+                        "Active SOP flow for {}: '{}' ({} pending items).",
+                        context.aircraft_type, current_flow, pending_steps_count
+                    )
+                }
+                crate::sop_binding::SopBindingStatus::UnavailableForAircraft {
+                    aircraft,
+                    reason,
+                } => {
+                    format!("SOP UNAVAILABLE FOR {}: {}.", aircraft, reason)
+                }
+                crate::sop_binding::SopBindingStatus::NotInstalled => {
+                    format!("No SOP package loaded for {}.", context.aircraft_type)
+                }
+            }
         } else {
             let (_, ev) = CrewToolRegistry::execute_tool("get_flight_state", context);
             evidence.push(ev);

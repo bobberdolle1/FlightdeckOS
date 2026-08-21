@@ -1,0 +1,38 @@
+# FlightdeckOS headless scenario — UUEE (Sheremetyevo) -> ULLI (Pulkovo).
+#
+# Route provenance: airport coordinates resolved READ-ONLY from the local
+# OpenAIRAC world database (data/world.openairac.sqlite, airports table,
+# latest revision). This is a DETERMINISTIC TEST ROUTE between the two
+# airports — not an ATC-cleared routing.
+#
+# HEADLESS VIRTUAL TEST — not live simulator validation, not real aircraft
+# performance validation.
+
+[scenario]
+id = "uuee-ulli-headless"
+package = "aircraft/a32nx"
+flow = "before_start"
+
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+
+[initial_conditions]
+heading_deg = 330.0
+engines_running = false
+on_ground = true
+
+[mission]
+cruise_altitude_ft = 34000.0
+
+[simulation]
+dt_ms = 100
+max_sim_seconds = 7200

@@ -16,4 +16,5 @@ pub mod runner;
 pub mod spec;
 
 pub use report::{ScenarioReport, ScenarioResult};
+pub use runner::run_scenario;
 pub use spec::{ScenarioSpec, ScenarioSpecError};

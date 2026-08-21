@@ -6,9 +6,11 @@
 pub mod error;
 pub mod provider;
 pub mod runtime;
+pub mod sop_binding;
 pub mod tools;
 
 pub use error::AiCrewError;
 pub use provider::{AiCrewPrompt, AiCrewResponse, AiModelProvider, DeterministicAiProvider};
 pub use runtime::AiCrewRuntime;
+pub use sop_binding::{SopAircraftBinding, SopBindingStatus};
 pub use tools::{CrewToolDefinition, CrewToolRegistry, ProposedAction, ToolEvidence};

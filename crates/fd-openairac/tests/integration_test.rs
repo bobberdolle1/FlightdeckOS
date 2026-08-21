@@ -37,6 +37,10 @@ fn create_sample_snapshot(
             elevation_ft: Some(622.0),
             selected_runway: Some("24C".to_string()),
             procedure_name: Some("EMGAS 3H".to_string()),
+            sid_procedure: Some("EMGAS 3H".to_string()),
+            star_procedure: None,
+            approach_procedure: None,
+            approach_type: None,
             transition_name: None,
             initial_or_final_restrictions: vec!["EMGAS: FL120".to_string()],
             provider_name: Some("CAICA".to_string()),
@@ -70,6 +74,22 @@ fn create_sample_snapshot(
                 None
             } else {
                 Some("BURUD 2Y".to_string())
+            },
+            sid_procedure: None,
+            star_procedure: if is_dest_source_req {
+                None
+            } else {
+                Some("BURUD 2Y".to_string())
+            },
+            approach_procedure: if is_dest_source_req {
+                None
+            } else {
+                Some("ILS 19R".to_string())
+            },
+            approach_type: if is_dest_source_req {
+                None
+            } else {
+                Some("ILS".to_string())
             },
             transition_name: None,
             initial_or_final_restrictions: Vec::new(),
@@ -215,6 +235,11 @@ fn test_snapshot_v2_parsing_and_crew_context_mapping() {
     assert_eq!(ctx.altitude_ft, 36000.0);
     assert_eq!(ctx.groundspeed_kts, 460.0);
     assert_eq!(ctx.next_fix, "BURUD");
+    assert_eq!(ctx.star_procedure, Some("BURUD 2Y".to_string()));
+    assert_eq!(ctx.approach_procedure, Some("ILS 19R".to_string()));
+    assert_eq!(ctx.approach_type, Some("ILS".to_string()));
+    assert!(ctx.arrival_brief_text.contains("STAR BURUD 2Y"));
+    assert!(ctx.arrival_brief_text.contains("Approach ILS 19R"));
     assert_eq!(ctx.xtk_side, "RIGHT");
     assert_eq!(ctx.tod_distance_nm, Some(42.5));
     assert_eq!(ctx.freshness.telemetry_status, "CURRENT");

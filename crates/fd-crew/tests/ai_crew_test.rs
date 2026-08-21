@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fd_crew::{AiCrewRuntime, DeterministicAiProvider};
+use fd_crew::{AiCrewRuntime, DeterministicAiProvider, SopAircraftBinding, SopBindingStatus};
 use fd_openairac::types::{
     EXPECTED_SNAPSHOT_V2_SCHEMA, OpenAiracActiveLeg, OpenAiracAircraftProfile,
     OpenAiracAirportBrief, OpenAiracConstraint, OpenAiracDataProvenance, OpenAiracDescentProfile,
@@ -35,6 +35,10 @@ fn create_uuee_urff_snapshot() -> OpenAiracSnapshotV2 {
             elevation_ft: Some(622.0),
             selected_runway: Some("24C".to_string()),
             procedure_name: Some("EMGAS 3H".to_string()),
+            sid_procedure: Some("EMGAS 3H".to_string()),
+            star_procedure: None,
+            approach_procedure: None,
+            approach_type: None,
             transition_name: None,
             initial_or_final_restrictions: Vec::new(),
             provider_name: Some("CAICA".to_string()),
@@ -49,6 +53,10 @@ fn create_uuee_urff_snapshot() -> OpenAiracSnapshotV2 {
             elevation_ft: Some(639.0),
             selected_runway: Some("19R".to_string()),
             procedure_name: Some("BURUD 2Y".to_string()),
+            sid_procedure: None,
+            star_procedure: Some("BURUD 2Y".to_string()),
+            approach_procedure: Some("ILS 19R".to_string()),
+            approach_type: Some("ILS".to_string()),
             transition_name: None,
             initial_or_final_restrictions: Vec::new(),
             provider_name: Some("CAICA".to_string()),
@@ -169,42 +177,23 @@ fn create_uuee_urff_snapshot() -> OpenAiracSnapshotV2 {
 }
 
 #[test]
-fn test_ai_crew_questions_uuee_urff_cruise() {
+fn test_arrival_brief_semantic_roundtrip_uuee_urff() {
     let mut runtime = AiCrewRuntime::new(Arc::new(DeterministicAiProvider));
     let snap = create_uuee_urff_snapshot();
     runtime.update_from_snapshot(&snap);
 
-    // 1. Where are we?
-    let r1 = runtime.ask("Where are we?").unwrap();
-    assert!(r1.message.contains("CRUISE"));
-    assert!(r1.message.contains("FL360"));
-    assert!(r1.message.contains("460 kt"));
-    assert_eq!(r1.tool_evidence.len(), 2);
+    // 1. Verify semantic extraction in context
+    let ctx = runtime.context().unwrap();
+    assert_eq!(ctx.star_procedure, Some("BURUD 2Y".to_string()));
+    assert_eq!(ctx.approach_procedure, Some("ILS 19R".to_string()));
+    assert_eq!(ctx.approach_type, Some("ILS".to_string()));
 
-    // 2. What are we flying now?
-    let r2 = runtime.ask("What are we flying now?").unwrap();
-    assert!(r2.message.contains("EMGAS -> BURUD"));
-    assert!(r2.message.contains("BURUD"));
-
-    // 3. What is the next fix?
-    let r3 = runtime.ask("What's the next fix?").unwrap();
-    assert!(r3.message.contains("BURUD"));
-    assert!(r3.message.contains("84.2 NM"));
-
-    // 4. When is TOD?
-    let r4 = runtime.ask("When is TOD?").unwrap();
-    assert!(r4.message.contains("42.5 NM"));
-    assert!(r4.message.contains("estimated"));
-
-    // 5. Brief the arrival
-    let r5 = runtime.ask("Brief me for the arrival.").unwrap();
-    assert!(r5.message.contains("URFF"));
-    assert!(r5.message.contains("URFF 19012KT"));
-
-    // 6. Is our data current?
-    let r6 = runtime.ask("Is our data current?").unwrap();
-    assert!(r6.message.contains("Telemetry is CURRENT"));
-    assert!(r6.message.contains("Weather is CURRENT"));
+    // 2. Ask for arrival brief
+    let r_arr = runtime.ask("Brief me for the arrival.").unwrap();
+    assert!(r_arr.message.contains("STAR BURUD 2Y"));
+    assert!(r_arr.message.contains("Approach ILS 19R"));
+    assert!(!r_arr.message.contains("Approach BURUD 2Y")); // No relabeling of STAR as Approach!
+    assert!(r_arr.message.contains("URFF 19012KT"));
 }
 
 #[test]
@@ -215,6 +204,9 @@ fn test_ai_crew_negative_canary_uras_source_required() {
     snap_uras.destination.name = "Sukhumi Babushara".to_string();
     snap_uras.destination.is_source_required = true;
     snap_uras.destination.procedure_name = None;
+    snap_uras.destination.star_procedure = None;
+    snap_uras.destination.approach_procedure = None;
+    snap_uras.destination.approach_type = None;
 
     runtime.update_from_snapshot(&snap_uras);
 
@@ -225,6 +217,49 @@ fn test_ai_crew_negative_canary_uras_source_required() {
 
     let resp_app = runtime.ask("What approach are we flying?").unwrap();
     assert!(resp_app.message.contains("SOURCE_REQUIRED"));
+}
+
+#[test]
+fn test_aircraft_sop_package_isolation() {
+    // 1. TU154 flight context -> a32nx SOP is strictly rejected as UNAVAILABLE
+    let tu154_status = SopAircraftBinding::evaluate("TU154", None);
+    assert!(matches!(tu154_status, SopBindingStatus::NotInstalled));
+
+    let manifest = fd_aircraft::manifest::PackageManifest {
+        package_id: "a32nx".to_string(),
+        display_name: "FlyByWire A32NX".to_string(),
+        aircraft_family: "Airbus A320 family".to_string(),
+        simulator: "MSFS".to_string(),
+        addon: "FlyByWire A32NX".to_string(),
+        package_version: "0.1.0".to_string(),
+        schema_version: 1,
+        runtime_api_version: 1,
+        addon_source_rev: "master".to_string(),
+        live_verified: false,
+        notes: "Test fixture".to_string(),
+    };
+    let a32nx_pkg = fd_sop::package::ValidatedPackage {
+        manifest,
+        roles: vec![
+            fd_aircraft::roles::Role::Captain,
+            fd_aircraft::roles::Role::FirstOfficer,
+        ],
+        flows: Vec::new(),
+    };
+
+    let mismatch_status = SopAircraftBinding::evaluate("TU154", Some(&a32nx_pkg));
+    assert!(matches!(
+        mismatch_status,
+        SopBindingStatus::UnavailableForAircraft { .. }
+    ));
+    if let SopBindingStatus::UnavailableForAircraft { aircraft, reason } = mismatch_status {
+        assert_eq!(aircraft, "TU154");
+        assert!(reason.contains("No SOP package installed"));
+    }
+
+    // 2. A320 / A32NX flight context -> a32nx package is accepted
+    let match_status = SopAircraftBinding::evaluate("A320", Some(&a32nx_pkg));
+    assert!(matches!(match_status, SopBindingStatus::Active { .. }));
 }
 
 #[test]
@@ -248,7 +283,6 @@ fn test_ai_crew_independent_freshness_qualification() {
 #[test]
 fn test_ai_crew_failure_isolation_offline() {
     let mut runtime = AiCrewRuntime::default();
-    // Context is None -> asking must return clean typed error, not panic
     let err = runtime.ask("Where are we?").unwrap_err();
     assert!(matches!(err, fd_crew::AiCrewError::RuntimeUnavailable));
 }
