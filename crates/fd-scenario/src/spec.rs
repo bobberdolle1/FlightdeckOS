@@ -83,6 +83,9 @@ pub struct InitialConditions {
     pub heading_deg: f64,
     pub engines_running: bool,
     pub on_ground: bool,
+    /// Initial MSL altitude; defaults to origin elevation (on ground).
+    /// Setting it above elevation starts the scenario airborne.
+    pub altitude_ft: Option<f64>,
 }
 
 impl Default for InitialConditions {
@@ -91,6 +94,7 @@ impl Default for InitialConditions {
             heading_deg: 0.0,
             engines_running: false,
             on_ground: true,
+            altitude_ft: None,
         }
     }
 }

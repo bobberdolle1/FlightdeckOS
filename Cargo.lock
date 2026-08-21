@@ -311,6 +311,7 @@ dependencies = [
  "fd-sop",
  "fd-virtual",
  "serde",
+ "tempfile",
  "thiserror",
  "toml",
 ]

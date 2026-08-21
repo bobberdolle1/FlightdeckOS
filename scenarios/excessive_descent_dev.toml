@@ -1,0 +1,27 @@
+# FlightdeckOS negative scenario — DEVELOPMENT FDM gate demonstration.
+# A deliberately excessive descent rate must produce an FDM event.
+#
+# HEADLESS VIRTUAL TEST.
+
+[scenario]
+id = "excessive-descent-dev"
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+on_ground = false
+altitude_ft = 9000.0
+[mission]
+cruise_altitude_ft = 1500.0
+[simulation]
+dt_ms = 100
+max_sim_seconds = 900

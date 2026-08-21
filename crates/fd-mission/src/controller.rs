@@ -180,7 +180,9 @@ impl MissionController {
             }
             MissionPhase::Approach => {
                 cmds.set_target_speed_kt = Some(self.params.landing_speed_kt);
-                cmds.set_target_vertical_speed_fpm = Some(-700.0);
+                // Development value: gentle final descent so a NOMINAL
+                // mission does not trip the hard-touchdown FDM threshold.
+                cmds.set_target_vertical_speed_fpm = Some(-450.0);
                 cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
                 // Landing is the model's touchdown; when on ground we move on.
                 if on_ground {

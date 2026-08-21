@@ -59,6 +59,10 @@ pub struct KinematicState {
     pub pitch_deg: f64,
     pub bank_deg: f64,
     pub on_ground: bool,
+    /// Latched at rotation; cleared at touchdown. Prevents the model from
+    /// re-grounding itself immediately after liftoff while level at field
+    /// elevation.
+    lifted_off: bool,
 
     // -- targets -------------------------------------------------------------
     target_altitude_ft: f64,
@@ -84,6 +88,7 @@ impl KinematicState {
             pitch_deg: 0.0,
             bank_deg: 0.0,
             on_ground: true,
+            lifted_off: false,
             target_altitude_ft: ground_elevation_ft,
             target_speed_kt: 0.0,
             target_heading_deg: 0.0,
@@ -100,6 +105,17 @@ impl KinematicState {
     }
     pub const fn target_heading_deg(&self) -> f64 {
         self.target_heading_deg
+    }
+
+    /// Start airborne at an explicit MSL altitude (fault/scenario setups).
+    pub fn start_airborne_at(&mut self, altitude_ft: f64) {
+        self.altitude_ft = altitude_ft;
+        self.on_ground = altitude_ft <= self.ground_elevation_ft;
+        if !self.on_ground {
+            self.lifted_off = true;
+            self.ias_kt = 250.0;
+            self.groundspeed_kt = 250.0;
+        }
     }
 
     pub fn set_target_altitude(&mut self, ft: f64) {
@@ -142,21 +158,34 @@ impl KinematicState {
         let d_speed = speed_err.clamp(-max_d_speed, max_d_speed);
         self.ias_kt = (self.ias_kt + d_speed).clamp(0.0, 520.0);
 
-        // Ground roll / liftoff: below rotation speed the aircraft stays on
-        // the ground and GS equals IAS.
+        // Ground roll / liftoff / airborne determination.
+        //
+        // Once rotated past Vr the model is AIRBORNE and stays airborne
+        // until it descends through field elevation with negative VS
+        // (a real touchdown). Level flight at field elevation right after
+        // liftoff must NOT slam the model back onto the ground.
         const ROTATION_IAS_KT: f64 = 140.0;
-        if self.on_ground && self.ias_kt < ROTATION_IAS_KT {
-            self.groundspeed_kt = self.ias_kt;
-            self.vertical_speed_fpm = 0.0;
-            self.pitch_deg = 0.0;
-            self.altitude_ft = self.ground_elevation_ft;
-        } else {
-            // Liftoff transition (once): pitch up, leave the ground.
-            if self.on_ground {
+        if !self.lifted_off {
+            if self.ias_kt >= ROTATION_IAS_KT {
+                // Rotation -> liftoff.
+                self.lifted_off = true;
                 self.on_ground = false;
                 self.pitch_deg = 5.0;
+            } else {
+                // Ground roll.
+                self.groundspeed_kt = self.ias_kt;
+                self.vertical_speed_fpm = 0.0;
+                self.pitch_deg = 0.0;
+                self.altitude_ft = self.ground_elevation_ft;
             }
+        }
 
+        if self.on_ground {
+            // Still in ground roll (rotation not reached this tick).
+            self.groundspeed_kt = self.ias_kt;
+            self.vertical_speed_fpm = 0.0;
+            self.altitude_ft = self.ground_elevation_ft;
+        } else {
             // --- vertical ---------------------------------------------------
             // Target VS: explicit command wins; otherwise proportional
             // closure toward the target altitude with bounded rates.
@@ -193,10 +222,15 @@ impl KinematicState {
                 }
             }
 
-            // Ground floor: descending through field elevation = touchdown.
-            if self.altitude_ft <= self.ground_elevation_ft {
+            // Touchdown: DESCENDING through field elevation. Level flight
+            // at field elevation right after liftoff is still airborne.
+            if self.altitude_ft <= self.ground_elevation_ft && self.vertical_speed_fpm < 0.0 {
                 self.altitude_ft = self.ground_elevation_ft;
+                // Keep the impact vertical speed for THIS tick so FDR/QoL
+                // observe the touchdown rate; the ground-roll branch zeroes
+                // it from the next tick on.
                 self.on_ground = true;
+                self.lifted_off = false;
                 self.pitch_deg = 0.0;
             }
         }

@@ -75,10 +75,14 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         spec.initial_conditions.heading_deg,
         spec.simulation.dt_ms,
     )));
-    world
-        .borrow_mut()
-        .systems_mut()
-        .set_engines_running(spec.initial_conditions.engines_running);
+    {
+        let mut w = world.borrow_mut();
+        w.systems_mut()
+            .set_engines_running(spec.initial_conditions.engines_running);
+        if let Some(alt) = spec.initial_conditions.altitude_ft {
+            w.kinematics_mut().start_airborne_at(alt);
+        }
+    }
 
     let trace_path = std::env::temp_dir().join(format!(
         "fd_scenario_trace_{}_{}.jsonl",
@@ -287,7 +291,56 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         }
     }
 
+    // Capability report composition (generic vs profiled).
+    let mut caps = fd_core::capability::CapabilityReport::new();
+    use fd_core::capability::CapabilityStatus as Cap;
+    for cap in [
+        "telemetry.position",
+        "telemetry.airspeed",
+        "telemetry.attitude",
+        "telemetry.gear",
+        "telemetry.vertical_speed",
+        "fdr.recording",
+        "fdm.analysis",
+        "qoa.approach",
+        "autonomy.route_guidance",
+    ] {
+        caps.set(cap, Cap::Verified);
+    }
+    for cap in [
+        "systems.electrical",
+        "systems.pneumatic",
+        "action.lights",
+        "action.beacon",
+        "procedure.before_start",
+        "procedure.any",
+        "autonomy.sop",
+    ] {
+        if validated_package.is_some() {
+            // Supported by package definitions; live behavior still unproven.
+            caps.set(cap, Cap::Supported);
+        } else {
+            // No package: SOP/system knowledge is UNAVAILABLE — never guessed.
+            caps.set(cap, Cap::Unavailable);
+        }
+    }
+    caps.set(
+        "action.apu",
+        if validated_package.is_some() {
+            Cap::Supported
+        } else {
+            Cap::Unsupported
+        },
+    );
+    caps.set("autonomy.flight", Cap::Partial);
+    caps.set("autonomy.ground", Cap::Unavailable);
+
     Ok(ScenarioReport {
+        capabilities: caps
+            .entries_sorted()
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str().to_string()))
+            .collect(),
         headless_virtual_test: true,
         not_live_simulator_validation: true,
         not_real_aircraft_performance_validation: true,

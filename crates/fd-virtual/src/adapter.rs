@@ -68,6 +68,12 @@ impl VirtualSimulator {
         &mut self.systems
     }
 
+    /// Access to the kinematic model for scenario setup
+    /// (e.g. starting airborne at an altitude).
+    pub fn kinematics_mut(&mut self) -> &mut KinematicState {
+        &mut self.kinematics
+    }
+
     /// Advance the world one fixed step; returns the post-step snapshot.
     pub fn advance_tick(&mut self) -> TelemetrySnapshot {
         self.systems.advance(self.clock.dt_ms);

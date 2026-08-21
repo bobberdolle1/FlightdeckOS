@@ -32,6 +32,7 @@ pub struct AutonomyMetrics {
 /// Full structured mission/scenario report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioReport {
+    pub capabilities: Vec<(String, String)>,
     /// Explicit proof-domain labels.
     pub headless_virtual_test: bool,
     pub not_live_simulator_validation: bool,
