@@ -21,6 +21,6 @@ pub mod trace;
 pub use catalog::{a32nx_default_catalog, postcondition};
 pub use executor::{ActionExecutor, ActionRecord, DeadlineTicks};
 pub use replay::{ReplayAdapter, ReplayStep};
-pub use runtime::{Runtime, TickStats};
+pub use runtime::{Runtime, RuntimeError, TickStats};
 pub use session::{Session, SessionId};
-pub use trace::{TRACE_VERSION, TraceEvent, TraceVersion, TraceWriter};
+pub use trace::{TRACE_VERSION, TraceEvent, TraceSink, TraceVersion, TraceWriter};

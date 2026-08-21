@@ -110,6 +110,16 @@ struct TraceLine {
     event: TraceEvent,
 }
 
+/// Storage-agnostic trace sink contract.
+///
+/// Exists so the runtime can be tested against a controllable failing sink
+/// (Task 1.2 F6): trace failures must surface as a distinct domain error and
+/// poison the runtime, never as adapter/simulator failures.
+pub trait TraceSink {
+    fn append(&mut self, event: &TraceEvent) -> Result<(), TraceError>;
+    fn finish(self) -> Result<(), TraceError>;
+}
+
 /// Append-only JSONL trace writer.
 pub struct TraceWriter {
     inner: BufWriter<File>,
@@ -147,7 +157,34 @@ impl TraceWriter {
         w.flush().map_err(|e| TraceError::Io(e.to_string()))
     }
 }
+
+impl TraceSink for TraceWriter {
+    fn append(&mut self, event: &TraceEvent) -> Result<(), TraceError> {
+        TraceWriter::append(self, event)
+    }
+
+    fn finish(self) -> Result<(), TraceError> {
+        TraceWriter::finish(self)
+    }
+}
 impl TraceEvent {
+    /// Sequence number carried by this event.
+    pub fn seq(&self) -> EventSeq {
+        match self {
+            Self::SessionStart { seq, .. }
+            | Self::SessionEnd { seq }
+            | Self::StateDelta { seq, .. }
+            | Self::PhaseChange { seq, .. }
+            | Self::SimStateChanged { seq, .. }
+            | Self::ActionRequested { seq, .. }
+            | Self::ActionValidated { seq, .. }
+            | Self::ActionDispatched { seq, .. }
+            | Self::ActionVerified { seq, .. }
+            | Self::ActionRejected { seq, .. }
+            | Self::ActionFailed { seq, .. } => *seq,
+        }
+    }
+
     /// Overwrite the carried sequence number (used by the runtime when it
     /// assigns final monotonic seqs to events produced during a tick).
     pub fn set_seq(&mut self, seq: EventSeq) {

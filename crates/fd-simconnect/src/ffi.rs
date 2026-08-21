@@ -17,6 +17,7 @@
 //!   keep backward compatibility).
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+#![allow(clippy::upper_case_acronyms)]
 
 use std::ffi::c_void;
 

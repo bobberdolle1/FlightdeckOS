@@ -12,12 +12,25 @@ use fd_core::actions::{ActionCatalog, Actor, CockpitAction};
 use fd_core::adapter::{AdapterError, SimulatorAdapter};
 use fd_core::events::EventSource;
 use fd_core::telemetry::TelemetrySnapshot;
+use thiserror::Error;
 
 use crate::executor::{ActionExecutor, DeadlineTicks};
 use crate::ingest;
 use crate::phase_tracker::PhaseTracker;
 use crate::session::{Session, SessionId};
-use crate::trace::{TraceError, TraceEvent, TraceWriter};
+use crate::trace::{TraceError, TraceEvent, TraceSink};
+
+/// Runtime-level domain errors. Trace/storage failures are FIRST-CLASS:
+/// they are never reported as adapter/simulator failures (Task 1.2 F6).
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    #[error("simulator adapter error: {0}")]
+    Adapter(#[from] AdapterError),
+    #[error("trace failure: {0}")]
+    Trace(#[from] TraceError),
+    #[error("runtime poisoned by an earlier trace failure: {0}")]
+    Poisoned(String),
+}
 
 /// Per-tick statistics (informational only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,21 +40,29 @@ pub struct TickStats {
 }
 
 /// The runtime: owns session, phase tracker, action executor, trace.
-pub struct Runtime {
+///
+/// `W` is the trace sink; [`TraceWriter`] is the production implementation,
+/// controllable failing sinks are used in tests (F6).
+pub struct Runtime<W: TraceSink> {
     adapter: Box<dyn SimulatorAdapter>,
     session: Session,
     phase: PhaseTracker,
     executor: ActionExecutor,
     catalog: ActionCatalog,
-    trace: TraceWriter,
+    trace: W,
     last: Option<TelemetrySnapshot>,
+    /// Set on the first trace failure: the runtime then refuses all further
+    /// work (fail-stop). In-memory state that missed its mandatory trace
+    /// events is discarded when the poisoned runtime is dropped — it must
+    /// never silently continue (Task 1.2 F6).
+    poisoned: Option<TraceError>,
 }
 
-impl Runtime {
+impl<W: TraceSink> Runtime<W> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         adapter: Box<dyn SimulatorAdapter>,
-        trace: TraceWriter,
+        trace: W,
         session_id: SessionId,
         catalog: ActionCatalog,
         deadline: DeadlineTicks,
@@ -54,19 +75,36 @@ impl Runtime {
             catalog,
             trace,
             last: None,
+            poisoned: None,
+        }
+    }
+
+    /// Record a trace failure and poison the runtime.
+    fn poison(&mut self, err: TraceError) -> RuntimeError {
+        let detail = err.to_string();
+        self.poisoned = Some(TraceError::Corrupt(detail.clone()));
+        RuntimeError::Trace(err)
+    }
+
+    fn check_poisoned(&self) -> Result<(), RuntimeError> {
+        match &self.poisoned {
+            Some(e) => Err(RuntimeError::Poisoned(e.to_string())),
+            None => Ok(()),
         }
     }
 
     /// Connect the adapter and emit `SessionStart`.
-    pub fn start(&mut self) -> Result<(), AdapterError> {
-        self.adapter.connect()?;
+    pub fn start(&mut self) -> Result<(), RuntimeError> {
+        self.check_poisoned()?;
+        self.adapter.connect().map_err(RuntimeError::Adapter)?;
         let seq = self.session.next_seq();
-        self.trace
-            .append(&TraceEvent::SessionStart {
-                seq,
-                session_id: self.session.id,
-            })
-            .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
+        if let Err(e) = self.trace.append(&TraceEvent::SessionStart {
+            seq,
+            session_id: self.session.id,
+        }) {
+            let err = self.poison(e);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -76,27 +114,40 @@ impl Runtime {
         action: CockpitAction,
         actor: Actor,
         at: fd_core::telemetry::SimTimestamp,
-    ) -> Result<fd_core::actions::ActionId, TraceError> {
+    ) -> Result<fd_core::actions::ActionId, RuntimeError> {
+        self.check_poisoned()?;
         let seq = self.session.next_seq();
         let (id, event) = self.executor.submit(action, actor, at, seq);
-        self.trace.append(&event)?;
+        if let Err(e) = self.trace.append(&event) {
+            return Err(self.poison(e));
+        }
+        // NOTE: the request enters the pipeline only after its mandatory
+        // trace event is durably appended (mutation-after-trace ordering).
+        self.executor.commit();
         Ok(id)
     }
 
     /// Advance the runtime by one tick.
     ///
-    /// Returns `Err(NotConnected)` when the adapter is not connected; the
-    /// caller decides whether that is fatal.
-    pub fn tick(&mut self, source: EventSource) -> Result<TickStats, AdapterError> {
+    /// Trace semantics (Task 1.2 F6): all events of this tick are buffered,
+    /// then appended under freshly allocated monotonic sequence numbers. On
+    /// the FIRST trace failure the runtime POISONS itself: the error is
+    /// returned as [`RuntimeError::Trace`] (never disguised as an adapter
+    /// failure), every later call fails with [`RuntimeError::Poisoned`], and
+    /// the already-mutated in-memory state is abandoned by dropping the
+    /// runtime. The pipeline never continues in a silently untraced mode.
+    pub fn tick(&mut self, source: EventSource) -> Result<TickStats, RuntimeError> {
+        self.check_poisoned()?;
         if !self.adapter.is_connected() {
-            return Err(AdapterError::NotConnected);
+            return Err(RuntimeError::Adapter(AdapterError::NotConnected));
         }
         let mut stats = TickStats::default();
-        let snapshots = self.adapter.poll()?;
+        let snapshots = self.adapter.poll().map_err(RuntimeError::Adapter)?;
+
+        let mut events: Vec<TraceEvent> = Vec::new();
 
         for snapshot in snapshots {
             stats.snapshots += 1;
-            let mut events: Vec<TraceEvent> = Vec::new();
 
             // 1. Ingest (sim-state change + state delta).
             events.extend(ingest::ingest(&self.last, &snapshot, source));
@@ -108,23 +159,23 @@ impl Runtime {
                 events.push(evt);
             }
 
-            // 3. Action pipeline (validation → dispatch → verification).
+            // 3. Action pipeline (validation -> dispatch -> verification).
             events.extend(
                 self.executor
                     .advance(&self.catalog, self.adapter.as_mut(), &snapshot),
             );
 
-            // 4. Append with final monotonic sequence numbers.
-            for mut evt in events {
-                let seq = self.session.next_seq();
-                evt.set_seq(seq);
-                self.trace
-                    .append(&evt)
-                    .map_err(|e| AdapterError::WriteFailed(e.to_string()))?;
-                stats.events += 1;
-            }
-
             self.last = Some(snapshot);
+        }
+
+        // 4. Append buffered events with final monotonic sequence numbers.
+        for evt in &mut events {
+            let seq = self.session.next_seq();
+            evt.set_seq(seq);
+            if let Err(e) = self.trace.append(evt) {
+                return Err(self.poison(e));
+            }
+            stats.events += 1;
         }
 
         Ok(stats)
@@ -142,16 +193,24 @@ impl Runtime {
         self.phase.current()
     }
 
+    /// Number of actions currently in the pipeline.
+    pub fn pending_action_count(&self) -> usize {
+        self.executor.pending_count()
+    }
+
     /// Most recent snapshot (for callers/tests).
     pub fn last_snapshot(&self) -> Option<&TelemetrySnapshot> {
         self.last.as_ref()
     }
 
     /// Emit `SessionEnd` and flush the trace.
-    pub fn finish(mut self) -> Result<(), TraceError> {
+    pub fn finish(mut self) -> Result<(), RuntimeError> {
+        self.check_poisoned()?;
         let seq = self.session.next_seq();
-        self.trace.append(&TraceEvent::SessionEnd { seq })?;
-        self.trace.finish()
+        if let Err(e) = self.trace.append(&TraceEvent::SessionEnd { seq }) {
+            return Err(self.poison(e));
+        }
+        self.trace.finish().map_err(RuntimeError::Trace)
     }
 }
 
@@ -160,6 +219,7 @@ mod tests {
     use super::*;
     use crate::catalog::a32nx_default_catalog;
     use crate::replay::{ReplayAdapter, ReplayStep};
+    use crate::trace::TraceWriter;
     use fd_core::actions::{Actor, CockpitAction, SwitchPosition};
     use fd_core::events::EventSource;
     use fd_core::telemetry::{SimTimestamp, TelemetrySnapshot};
@@ -242,6 +302,128 @@ mod tests {
             "session_end",
         ];
         assert_eq!(kinds.as_slice(), expected.as_slice());
+    }
+
+    /// Controllable failing trace sink for F6 semantics tests.
+    struct FailingTraceWriter {
+        fail_at_append: usize,
+        appends_done: usize,
+    }
+    impl crate::trace::TraceSink for FailingTraceWriter {
+        fn append(&mut self, event: &TraceEvent) -> Result<(), crate::trace::TraceError> {
+            self.appends_done += 1;
+            if self.appends_done == self.fail_at_append {
+                return Err(crate::trace::TraceError::Io("injected disk failure".into()));
+            }
+            let _ = event;
+            Ok(())
+        }
+        fn finish(self) -> Result<(), crate::trace::TraceError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trace_failure_during_state_event_is_runtime_trace_error_and_poisons() {
+        // session_start(1), then the SECOND snapshot's state_delta(2):
+        // fail exactly on that delta append.
+        let adapter = ReplayAdapter::new(vec![
+            ReplayStep::Snapshot(beacon_snap(0, false, false)),
+            ReplayStep::Snapshot(beacon_snap(1000, true, false)),
+        ]);
+        let writer = FailingTraceWriter {
+            fail_at_append: 2,
+            appends_done: 0,
+        };
+        let mut rt = Runtime::new(
+            Box::new(adapter),
+            writer,
+            SessionId(0),
+            a32nx_default_catalog(),
+            DeadlineTicks::default(),
+        );
+        rt.start().unwrap();
+
+        // Tick 1: first snapshot -> no delta yet, append budget untouched.
+        rt.tick(EventSource::Replay).unwrap();
+        let err = rt.tick(EventSource::Replay).unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::Trace(_)),
+            "expected Trace domain error, got {err:?}"
+        );
+
+        // Poisoned: every further call fails; nothing can silently continue.
+        let err = rt.tick(EventSource::Replay).unwrap_err();
+        assert!(matches!(err, RuntimeError::Poisoned(_)));
+        drop(rt); // in-memory untraced state is abandoned here
+    }
+
+    #[test]
+    fn trace_failure_during_action_transition_is_trace_domain_not_adapter() {
+        // session_start(1), then action_requested(2): fail on the request.
+        let adapter = ReplayAdapter::new(Vec::new());
+        let writer = FailingTraceWriter {
+            fail_at_append: 2,
+            appends_done: 0,
+        };
+        let mut rt = Runtime::new(
+            Box::new(adapter),
+            writer,
+            SessionId(0),
+            a32nx_default_catalog(),
+            DeadlineTicks::default(),
+        );
+        rt.start().unwrap();
+
+        let err = rt
+            .submit_action(
+                CockpitAction::SetBeacon(SwitchPosition::On),
+                Actor::User,
+                SimTimestamp::new(5),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::Trace(_)),
+            "trace failure must not be reported as adapter/write failure"
+        );
+        // The staged request was NOT committed into the pipeline.
+        assert_eq!(rt.pending_action_count(), 0);
+    }
+
+    #[test]
+    fn pause_keeps_event_sequence_strictly_monotonic_case_c() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s1 = beacon_snap(0, false, false);
+        s1.groundspeed = Some(SpeedKt::new(10.0));
+        let paused = beacon_snap(1000, false, true);
+        let mut s3 = beacon_snap(2000, false, false);
+        s3.groundspeed = Some(SpeedKt::new(14.0));
+
+        let adapter = ReplayAdapter::new(vec![
+            ReplayStep::Snapshot(s1),
+            ReplayStep::Snapshot(paused),
+            ReplayStep::Snapshot(s3),
+        ]);
+        let trace = TraceWriter::create(trace_path(&dir, "t.jsonl")).unwrap();
+        let mut rt = Runtime::new(
+            Box::new(adapter),
+            trace,
+            SessionId(0),
+            a32nx_default_catalog(),
+            DeadlineTicks::default(),
+        );
+        rt.start().unwrap();
+        for _ in 0..4 {
+            rt.tick(EventSource::Replay).unwrap();
+        }
+        rt.finish().unwrap();
+
+        let events = crate::trace::read_trace(trace_path(&dir, "t.jsonl")).unwrap();
+        let seqs: Vec<u64> = events.iter().map(|e| e.seq().value()).collect();
+        // Strictly increasing across the pause boundary.
+        for w in seqs.windows(2) {
+            assert!(w[0] < w[1], "non-monotonic seq: {seqs:?}");
+        }
     }
 
     #[test]

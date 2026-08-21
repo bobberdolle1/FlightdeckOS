@@ -154,7 +154,9 @@ fn run_live(out: Option<PathBuf>, max_ticks: u64, interval_ms: u64) -> anyhow::R
     loop {
         match runtime.tick(EventSource::Simulator) {
             Ok(_) => {}
-            Err(fd_core::adapter::AdapterError::NotConnected) => {
+            Err(fd_runtime::RuntimeError::Adapter(
+                fd_core::adapter::AdapterError::NotConnected,
+            )) => {
                 println!("simulator disconnected after {ticks} ticks");
                 break;
             }

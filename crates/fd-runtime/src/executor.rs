@@ -52,6 +52,9 @@ impl ActionRecord {
 /// The deterministic action pipeline.
 #[derive(Debug, Default)]
 pub struct ActionExecutor {
+    /// Staged requests whose mandatory `ActionRequested` trace event has not
+    /// been durably appended yet (two-phase submit, Task 1.2 F6).
+    staged: VecDeque<ActionRecord>,
     pending: VecDeque<ActionRecord>,
     next_id: u64,
     deadline: DeadlineTicks,
@@ -60,14 +63,17 @@ pub struct ActionExecutor {
 impl ActionExecutor {
     pub fn new(deadline: DeadlineTicks) -> Self {
         Self {
+            staged: VecDeque::new(),
             pending: VecDeque::new(),
             next_id: 0,
             deadline,
         }
     }
 
-    /// Enqueue an action; returns its id and the `ActionRequested` event
-    /// (with the caller-provided seq).
+    /// Stage an action: allocate its id and produce the `ActionRequested`
+    /// event (with the caller-provided seq). The request does NOT enter the
+    /// pipeline until [`Self::commit`] is called after the trace append —
+    /// mutation never precedes its mandatory audit record.
     pub fn submit(
         &mut self,
         action: fd_core::actions::CockpitAction,
@@ -83,7 +89,6 @@ impl ActionExecutor {
             actor,
             at,
         };
-        self.pending.push_back(ActionRecord::new(request.clone()));
         let event = TraceEvent::ActionRequested {
             seq,
             ts: at,
@@ -91,9 +96,18 @@ impl ActionExecutor {
             actor: request.actor,
             id: request.id,
         };
+        self.staged.push_back(ActionRecord::new(request));
         (id, event)
     }
 
+    /// Move all staged requests into the live pipeline. Called by the
+    /// runtime only after their trace events were appended successfully.
+    pub fn commit(&mut self) {
+        self.pending.extend(self.staged.drain(..));
+    }
+
+    /// Number of actions currently in the live pipeline (staged requests
+    /// not included — they are not yet traced).
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -168,7 +182,16 @@ impl ActionExecutor {
                         }
                     },
                     ActionStatus::Dispatched => {
-                        rec.ticks_since_dispatch += 1;
+                        // Simulator pause freezes the verification deadline:
+                        // no simulator state change is possible while paused,
+                        // so paused ticks must not consume the budget (Task
+                        // 1.2 F3). Counting resumes on the next Running tick
+                        // with the remaining budget intact.
+                        let paused =
+                            snapshot.sim_timing.state == fd_core::telemetry::SimState::Paused;
+                        if !paused {
+                            rec.ticks_since_dispatch += 1;
+                        }
                         match postcondition(rec.request.action, snapshot) {
                             Some(true) => {
                                 progressed = true;
@@ -179,7 +202,7 @@ impl ActionExecutor {
                                 });
                             }
                             Some(false) | None => {
-                                if rec.ticks_since_dispatch >= self.deadline.0 {
+                                if !paused && rec.ticks_since_dispatch >= self.deadline.0 {
                                     progressed = true;
                                     events.push(TraceEvent::ActionFailed {
                                         seq: placeholder,
@@ -265,6 +288,8 @@ mod tests {
             SimTimestamp::new(0),
             EventSeq::new(seq),
         );
+        // Tests write traces successfully -> commit immediately.
+        ex.commit();
         id
     }
 
@@ -360,6 +385,7 @@ mod tests {
             SimTimestamp::new(0),
             EventSeq::new(0),
         );
+        ex.commit();
         let s = snapshot_with_beacon(10, Some(true));
         let evts = ex.advance(&empty, &mut adapter, &s);
         assert!(evts.iter().any(|e| matches!(
@@ -401,6 +427,91 @@ mod tests {
         }
         assert!(failed, "verification did not time out");
         assert_eq!(ex.pending_count(), 0);
+    }
+
+    #[test]
+    fn pause_freezes_deadline_then_verified_after_unpause_case_a() {
+        let mut ex = ActionExecutor::new(DeadlineTicks(3)); // deadline = 3 active ticks
+        let cat = a32nx_default_catalog();
+        let mut adapter = ReplayAdapter::new(Vec::new());
+        submit_beacon(&mut ex, 0);
+
+        // Validate + dispatch on known-off state.
+        let running_off = |ts: u64| {
+            let mut s = snapshot_with_beacon(ts, Some(false));
+            s.sim_timing.state = fd_core::telemetry::SimState::Running;
+            s
+        };
+        let paused = |ts: u64| {
+            let mut s = snapshot_with_beacon(ts, Some(false));
+            s.sim_timing.state = fd_core::telemetry::SimState::Paused;
+            s
+        };
+        ex.advance(&cat, &mut adapter, &running_off(10));
+
+        // Pause for far longer than the deadline: budget must stay frozen.
+        for ts in 20..40 {
+            let evts = ex.advance(&cat, &mut adapter, &paused(ts));
+            assert!(
+                !evts
+                    .iter()
+                    .any(|e| matches!(e, TraceEvent::ActionFailed { .. })),
+                "timeout fired while paused at ts={ts}"
+            );
+        }
+        assert_eq!(ex.pending_count(), 1, "action must remain pending");
+
+        // Unpause and observe the post-condition -> Verified.
+        let on = snapshot_with_beacon(100, Some(true));
+        let evts = ex.advance(&cat, &mut adapter, &on);
+        assert!(
+            evts.iter()
+                .any(|e| matches!(e, TraceEvent::ActionVerified { .. }))
+        );
+        assert_eq!(ex.pending_count(), 0);
+    }
+
+    #[test]
+    fn pause_does_not_reset_budget_timeout_still_fires_case_b() {
+        let mut ex = ActionExecutor::new(DeadlineTicks(3));
+        let cat = a32nx_default_catalog();
+        let mut adapter = ReplayAdapter::new(Vec::new());
+        submit_beacon(&mut ex, 0);
+
+        let mk = |ts: u64, paused: bool| {
+            let mut s = snapshot_with_beacon(ts, Some(false));
+            s.sim_timing.state = if paused {
+                fd_core::telemetry::SimState::Paused
+            } else {
+                fd_core::telemetry::SimState::Running
+            };
+            s
+        };
+
+        // Validate + dispatch (tick 1 of budget).
+        ex.advance(&cat, &mut adapter, &mk(10, false));
+
+        // One paused tick: must NOT consume budget.
+        ex.advance(&cat, &mut adapter, &mk(20, true));
+
+        // Three ACTIVE ticks without post-condition: deadline reached.
+        let mut failed = false;
+        for i in 0..4 {
+            let evts = ex.advance(&cat, &mut adapter, &mk(30 + i * 10, false));
+            if evts.iter().any(|e| {
+                matches!(
+                    e,
+                    TraceEvent::ActionFailed {
+                        failure: ActionFailure::VerificationTimeout,
+                        ..
+                    }
+                )
+            }) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "timeout must fire after 3 active ticks");
     }
 
     #[test]

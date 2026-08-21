@@ -19,15 +19,17 @@ struct PollCtx {
 
 unsafe extern "system" fn dispatch_cb(
     pdata: *mut ffi::SIMCONNECT_RECV,
-    _cb_data: ffi::DWORD,
+    cb_data: ffi::DWORD,
     pcontext: *mut std::ffi::c_void,
 ) {
-    if pdata.is_null() || pcontext.is_null() {
+    if pdata.is_null() || pcontext.is_null() || cb_data == 0 {
         return;
     }
     let ctx = unsafe { &mut *(pcontext as *mut PollCtx) };
-    // SAFETY: pdata is a valid record delivered by SimConnect_CallDispatch.
-    let record = unsafe { parse_recv(pdata) };
+    // SAFETY: `pdata` points to `cb_data` initialized bytes delivered by
+    // SimConnect_CallDispatch for this handle; parse_recv never reads beyond
+    // cb_data (bounds are validated inside parse_record).
+    let record = unsafe { parse_recv(pdata, cb_data) };
     ctx.records.push(record);
 }
 

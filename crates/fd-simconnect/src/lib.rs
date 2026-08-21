@@ -18,7 +18,10 @@
 #![allow(unsafe_code)]
 
 pub mod bindings;
-pub mod ffi;
+// `ffi` is deliberately crate-private: it exposes raw SimConnect function
+// pointers, and leaking them would break the closed-action write guarantee
+// for downstream crates. The public surface is the typed adapter + bindings.
+mod ffi;
 
 #[cfg(windows)]
 mod adapter;

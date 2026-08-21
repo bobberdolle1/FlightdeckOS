@@ -90,6 +90,12 @@ impl SimulatorAdapter for SimConnectAdapter {
                     self.connected = false;
                 }
                 RecvRecord::Ignored => {}
+                RecvRecord::Malformed { detail } => {
+                    // Malformed records are dropped with a diagnostic; they
+                    // never produce state.
+                    self.last_exception = Some(u32::MAX - 1);
+                    let _ = detail;
+                }
             }
         }
         Ok(snapshots)
