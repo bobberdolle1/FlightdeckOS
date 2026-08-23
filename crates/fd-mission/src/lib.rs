@@ -11,6 +11,11 @@
 
 pub mod controller;
 pub mod route;
+pub mod shadow;
 
-pub use controller::{MissionContext, MissionController, MissionPhase};
+pub use controller::{
+    MissionCommands, MissionContext, MissionController, MissionParameters, MissionPhase,
+    intended_commands, intended_next_phase,
+};
 pub use route::{RouteFollower, Waypoint};
+pub use shadow::{ChannelStats, MissionShadow, ObservedApTargets, ShadowEntry, ShadowReport};
