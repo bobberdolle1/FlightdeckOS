@@ -107,7 +107,7 @@ impl FdmAnalyzer {
         // Excessive bank at low altitude.
         if !matches!(s.on_ground, Some(true))
             && let (Some(agl), Some(bank)) = (s.radio_altitude, s.bank)
-            && agl <= self.thresholds.excessive_bank_max_agl_ft
+            && bank.is_finite()
             && bank.abs() >= self.thresholds.excessive_bank_deg
         {
             new_events.push(FdmEvent {

@@ -44,7 +44,13 @@ impl NavLogoMode {
         }
     }
 
-    pub const fn from_raw(v: f64) -> Option<Self> {
+    /// Fail-closed decode: non-finite raw values (NaN/±inf from corrupt
+    /// telemetry or replay fixtures) must never saturate into a valid
+    /// switch position — they decode as `None` (unknown).
+    pub fn from_raw(v: f64) -> Option<Self> {
+        if !v.is_finite() {
+            return None;
+        }
         match v as u8 {
             0 => Some(Self::Off),
             1 => Some(Self::Sys1),

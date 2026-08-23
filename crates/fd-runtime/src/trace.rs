@@ -321,15 +321,30 @@ impl TraceEvent {
 }
 
 /// Trace reader: iterate events; fails closed on malformed/foreign versions.
+///
+/// Crash-recovery contract (module doc): a torn FINAL line — a partial write
+/// from a process crash between append and flush, recognizable because the
+/// file does not end with a newline — is discarded. Interior corruption and
+/// version mismatches remain hard errors.
 pub fn read_trace(path: impl AsRef<Path>) -> Result<Vec<TraceEvent>, TraceError> {
     let content = std::fs::read_to_string(path).map_err(|e| TraceError::Io(e.to_string()))?;
+    let torn_tail_allowed = !content.ends_with('\n');
+    let line_count = content.lines().count();
     let mut events = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: TraceLine = serde_json::from_str(line)
-            .map_err(|e| TraceError::Corrupt(format!("line {}: {e}", idx + 1)))?;
+        let parsed: TraceLine = match serde_json::from_str(line) {
+            Ok(p) => p,
+            Err(e) => {
+                let is_final = idx + 1 == line_count;
+                if torn_tail_allowed && is_final {
+                    break; // discard the torn tail, keep everything before it
+                }
+                return Err(TraceError::Corrupt(format!("line {}: {e}", idx + 1)));
+            }
+        };
         if parsed.v != TRACE_VERSION {
             return Err(TraceError::Corrupt(format!(
                 "line {}: unsupported trace version {}",

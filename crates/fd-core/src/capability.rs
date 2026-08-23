@@ -109,6 +109,12 @@ impl CapabilityReport {
     }
 
     /// Set status with explicit evidence provenance.
+    ///
+    /// Fail-closed provenance rule: `Verified` claims MUST rest on live or
+    /// simulator-backed evidence. `EvidenceSource::Static` means "wiring-level
+    /// knowledge only" and can never prove a live-verified capability, so the
+    /// combination is rejected as a programmer error instead of silently
+    /// fabricating an escalation path.
     pub fn set_with_evidence(
         &mut self,
         path: impl Into<String>,
@@ -116,6 +122,10 @@ impl CapabilityReport {
         evidence: EvidenceSource,
     ) -> &mut Self {
         let path = path.into();
+        assert!(
+            !(status == CapabilityStatus::Verified && evidence == EvidenceSource::Static),
+            "Verified capability requires live/simulator evidence, not Static: {path}"
+        );
         match self.entries.iter_mut().find(|e| e.path == path) {
             Some(entry) => {
                 entry.status = status;
@@ -209,7 +219,11 @@ mod tests {
     fn set_overwrites_and_entries_sort_deterministically() {
         let mut r = CapabilityReport::new();
         r.set("b.x", CapabilityStatus::Supported);
-        r.set("a.y", CapabilityStatus::Verified);
+        r.set_with_evidence(
+            "a.y",
+            CapabilityStatus::Verified,
+            EvidenceSource::VirtualSim,
+        );
         r.set("b.x", CapabilityStatus::Degraded);
         let e = r.entries_sorted();
         assert_eq!(e[0].path, "a.y");
@@ -219,7 +233,11 @@ mod tests {
     #[test]
     fn tier_is_presentation_only() {
         let mut r = CapabilityReport::new();
-        r.set("telemetry.position", CapabilityStatus::Verified);
+        r.set_with_evidence(
+            "telemetry.position",
+            CapabilityStatus::Verified,
+            EvidenceSource::VirtualSim,
+        );
         assert_eq!(support_tier(&r, false), SupportTier::Generic);
         r.set("procedure.any", CapabilityStatus::Supported);
         assert_eq!(support_tier(&r, true), SupportTier::Profiled);
