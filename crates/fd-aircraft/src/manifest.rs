@@ -38,6 +38,14 @@ pub struct PackageManifest {
     /// Free-form provenance / scope notes.
     #[serde(default)]
     pub notes: String,
+    /// ICAO type designator this package targets (e.g. "IL76"). Used by
+    /// package matching; empty means unknown and matches nothing.
+    #[serde(default)]
+    pub icao: String,
+    /// Addon author/publisher. Used by package matching (Exact tier);
+    /// empty means unknown and never matches.
+    #[serde(default)]
+    pub author: String,
 }
 
 fn non_empty(v: &str, field: &'static str) -> Result<(), PackageError> {
@@ -49,7 +57,7 @@ fn non_empty(v: &str, field: &'static str) -> Result<(), PackageError> {
 }
 
 impl PackageManifest {
-    fn validate(&self) -> Result<(), PackageError> {
+    pub(crate) fn validate(&self) -> Result<(), PackageError> {
         for (v, f) in [
             (&self.package_id, "package_id"),
             (&self.display_name, "display_name"),

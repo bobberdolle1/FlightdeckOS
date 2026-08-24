@@ -20,14 +20,21 @@ pub mod bindings_meta;
 pub mod catalog;
 pub mod condition;
 pub mod error;
+pub mod genesis;
 pub mod manifest;
+pub mod matching;
 pub mod raw_flow;
 pub mod roles;
 pub mod state_field;
+pub mod verification;
 
-pub use condition::{Condition, RawCondition, TriBool};
-pub use error::PackageError;
+pub use genesis::DraftProfile;
 pub use manifest::{PackageManifest, RUNTIME_API_VERSION, SCHEMA_VERSION, load_manifest};
+pub use matching::{MatchConfidence, PackageMatch, PackageMatcher};
 pub use raw_flow::{RawFlowDef, RawStep, RawStepBody};
 pub use roles::Role;
 pub use state_field::{StateField, ValueType};
+pub use verification::VerificationState;
+
+pub use condition::{Condition, RawCondition, TriBool};
+pub use error::PackageError;
