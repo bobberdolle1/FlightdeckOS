@@ -150,7 +150,10 @@ impl FdmAnalyzer {
     /// event per sample.
     pub fn process(&mut self, s: &FdrSample) -> Vec<FdmEvent> {
         let mut new_events = Vec::new();
-        let airborne = !matches!(s.on_ground, Some(true));
+        // Fail-closed per module doc: an UNKNOWN ground status closes any
+        // open exceedance (severity None) — only a known-airborne sample
+        // can evaluate the low-altitude rules.
+        let airborne = matches!(s.on_ground, Some(false));
 
         // Excessive sink rate (airborne, low AGL, known VS). Descent VS is
         // negative; compare the negated magnitude against the threshold.

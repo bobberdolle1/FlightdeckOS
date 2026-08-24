@@ -123,8 +123,12 @@ impl CapabilityReport {
     ) -> &mut Self {
         let path = path.into();
         assert!(
-            !(status == CapabilityStatus::Verified && evidence == EvidenceSource::Static),
-            "Verified capability requires live/simulator evidence, not Static: {path}"
+            status != CapabilityStatus::Verified
+                || matches!(
+                    evidence,
+                    EvidenceSource::LiveXplane | EvidenceSource::LiveMsfs
+                ),
+            "Verified capability requires LIVE adapter evidence (LiveXplane/LiveMsfs), got {evidence:?}: {path}"
         );
         match self.entries.iter_mut().find(|e| e.path == path) {
             Some(entry) => {
@@ -222,7 +226,7 @@ mod tests {
         r.set_with_evidence(
             "a.y",
             CapabilityStatus::Verified,
-            EvidenceSource::VirtualSim,
+            EvidenceSource::LiveXplane,
         );
         r.set("b.x", CapabilityStatus::Degraded);
         let e = r.entries_sorted();
@@ -236,7 +240,7 @@ mod tests {
         r.set_with_evidence(
             "telemetry.position",
             CapabilityStatus::Verified,
-            EvidenceSource::VirtualSim,
+            EvidenceSource::LiveXplane,
         );
         assert_eq!(support_tier(&r, false), SupportTier::Generic);
         r.set("procedure.any", CapabilityStatus::Supported);
@@ -259,6 +263,18 @@ mod tests {
             EvidenceSource::LiveXplane,
         );
         assert_eq!(r.status("telemetry.position"), CapabilityStatus::Verified);
+
         assert_eq!(r.evidence("telemetry.position"), EvidenceSource::LiveXplane);
+    }
+
+    #[test]
+    #[should_panic(expected = "Verified capability requires LIVE adapter evidence")]
+    fn verified_with_virtual_evidence_panics() {
+        let mut r = CapabilityReport::new();
+        r.set_with_evidence(
+            "telemetry.position",
+            CapabilityStatus::Verified,
+            EvidenceSource::VirtualSim,
+        );
     }
 }
