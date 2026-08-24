@@ -3,15 +3,20 @@
 //!
 //! * Telemetry: only from received UDP packets — never fabricated, never
 //!   substituted with virtual state (Task 4 §7/§17).
-//! * Control: allowlisted autopilot-target writes only (Task 4 §10).
+//! * Control: allowlisted autopilot-target writes only (Task 4 §10);
+//!   non-finite targets are rejected before the wire.
 //! * Disconnect: typed `NotConnected` on stale packets; `Degraded`
 //!   capability while disconnected; automatic resubscribe on reconnect
 //!   (Task 4 §16).
+//! * Identity: carried with provenance (`fd_core::identity`); stock UDP
+//!   cannot read the byte-array identity datarefs, so unknown stays
+//!   unknown unless an operator supplies a claim.
 
 use std::time::{Duration, Instant};
 
 use fd_core::actions::CockpitAction;
 use fd_core::adapter::{AdapterError, Capability, FlightControlTargets, SimulatorAdapter};
+use fd_core::identity::AircraftIdentity;
 use fd_core::telemetry::{SimState, SimTimestamp, TelemetrySnapshot};
 use fd_core::units::{
     AltitudeAglFt, AltitudeFt, AngleDeg, LatDeg, LonDeg, SpeedKt, VerticalSpeedFpm,
@@ -45,13 +50,29 @@ impl Default for XPlaneConfig {
 /// Live adapter over the native X-Plane UDP transport.
 pub struct XPlaneAdapter {
     client: XPlaneUdpClient,
-    /// Snapshot observed at the moment connection was lost (diagnostics).
+    /// Best-effort aircraft identity (see `fd_core::identity`): unknown
+    /// unless an operator supplies a claim — stock UDP cannot read the
+    /// byte-array identity datarefs.
+    identity: AircraftIdentity,
+    /// Last rejected control-target write (non-finite input / send error).
+    last_control_error: Option<String>,
+    /// Number of poll cycles that observed a disconnected transport.
     disconnects: u64,
     last_poll_duration: Option<Duration>,
 }
 
 impl XPlaneAdapter {
     pub fn new(cfg: XPlaneConfig) -> Result<Self, AdapterError> {
+        Self::with_identity(cfg, AircraftIdentity::unknown())
+    }
+
+    /// Build the adapter with an operator-claimed aircraft identity.
+    /// The claim keeps `IdentitySource::UserProvided` provenance and is
+    /// never treated as a trusted adapter read.
+    pub fn with_identity(
+        cfg: XPlaneConfig,
+        identity: AircraftIdentity,
+    ) -> Result<Self, AdapterError> {
         let mut client = XPlaneUdpClient::new(0, &cfg.host, cfg.port)
             .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
         let refs: Vec<(i32, &'static str)> = DataRefId::ALL
@@ -63,9 +84,21 @@ impl XPlaneAdapter {
             .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
         Ok(Self {
             client,
+            identity,
+            last_control_error: None,
             disconnects: 0,
             last_poll_duration: None,
         })
+    }
+
+    /// The aircraft identity this adapter was constructed with.
+    pub fn identity(&self) -> &AircraftIdentity {
+        &self.identity
+    }
+
+    /// Take the last rejected control-target write, if any (diagnostics).
+    pub fn take_last_control_error(&mut self) -> Option<String> {
+        self.last_control_error.take()
     }
 
     /// Wait for the first telemetry packet (bounded).
@@ -82,6 +115,21 @@ impl XPlaneAdapter {
 
     pub fn packets_received(&self) -> u64 {
         self.client.packets_received()
+    }
+
+    /// Datagrams dropped because their source was not the simulator.
+    pub fn rejected_foreign_packets(&self) -> u64 {
+        self.client.rejected_foreign_packets()
+    }
+
+    /// Record ids dropped because they are outside the subscribed set.
+    pub fn unknown_ids_dropped(&self) -> u64 {
+        self.client.unknown_ids_dropped()
+    }
+
+    /// Receive errors survived (non-fatal by design).
+    pub fn recv_errors(&self) -> u64 {
+        self.client.recv_errors()
     }
 
     pub fn newest_packet_age(&self) -> Duration {
@@ -137,10 +185,14 @@ impl XPlaneAdapter {
         s.altitude_msl = self
             .value(DataRefId::ElevationM)
             .map(|m| AltitudeFt::new(m * M_TO_FT));
-        let agl = self
-            .value(DataRefId::YAglM)
-            .map(|m| AltitudeAglFt::new(m * M_TO_FT));
-        s.altitude_agl = agl;
+        // AGL preference: the radio altimeter is the truthful height above
+        // terrain once airborne; geometric y_agl stays the fallback.
+        let radio_ft = self.value(DataRefId::RadioAltitudeFt);
+        let y_agl_ft = self.value(DataRefId::YAglM).map(|m| m * M_TO_FT);
+        s.altitude_agl = match radio_ft {
+            Some(r) if r > 0.0 => Some(AltitudeAglFt::new(r)),
+            _ => y_agl_ft.map(AltitudeAglFt::new),
+        };
         s.indicated_airspeed = self.value(DataRefId::IndicatedAirspeedKt).map(SpeedKt::new);
         s.groundspeed = self
             .value(DataRefId::GroundspeedMs)
@@ -165,6 +217,19 @@ impl XPlaneAdapter {
             SimState::Unknown
         };
         s
+    }
+
+    /// Validate a control target before it may reach the wire: non-finite
+    /// inputs (NaN/±inf) are rejected, recorded, and never sent. Returns
+    /// the value unchanged (f64) so unit conversions keep full precision;
+    /// callers cast to f32 at the wire boundary.
+    fn checked_target(&mut self, name: &str, value: f64) -> Option<f64> {
+        if value.is_finite() {
+            Some(value)
+        } else {
+            self.last_control_error = Some(format!("{name}: non-finite target {value}"));
+            None
+        }
     }
 }
 
@@ -245,36 +310,52 @@ impl FlightControlTargets for XPlaneAdapter {
     fn set_target_altitude(&mut self, altitude_ft: f64) {
         // Target write only: mode engagement is aircraft-specific and is
         // NOT auto-pressed in this slice (reported honestly as unproven).
-        let _ = self.write_ap(WriteRef::ApAltitude, altitude_ft as f32);
+        if let Some(v) = self.checked_target("altitude", altitude_ft)
+            && let Err(e) = self.write_ap(WriteRef::ApAltitude, v as f32)
+        {
+            self.last_control_error = Some(e.to_string());
+        }
     }
 
     fn set_target_speed(&mut self, speed_kt: f64) {
-        let _ = self.write_ap(WriteRef::ApAirspeed, speed_kt as f32);
+        if let Some(v) = self.checked_target("speed", speed_kt)
+            && let Err(e) = self.write_ap(WriteRef::ApAirspeed, v as f32)
+        {
+            self.last_control_error = Some(e.to_string());
+        }
     }
 
     fn set_target_heading(&mut self, heading_deg: f64) {
+        let Some(v) = self.checked_target("heading", heading_deg) else {
+            return;
+        };
         let magvar = self.value(DataRefId::MagVariationDeg).unwrap_or(0.0);
-        if self
-            .write_ap(WriteRef::ApHeadingMag, true_to_mag(heading_deg, magvar))
-            .is_ok()
+        if let Err(e) = self.write_ap(WriteRef::ApHeadingMag, true_to_mag(v, magvar)) {
+            self.last_control_error = Some(e.to_string());
+            return;
+        }
+        // Engage HDG mode only when it is currently OFF (status 0).
+        // Status 2 = captured; re-sending the command would TOGGLE it
+        // off, so gate on the observed status.
+        if self.value(DataRefId::ApHeadingStatus).unwrap_or(0.0) < 2.0
+            && let Err(e) = self.engage(Command::ApHeadingHold)
         {
-            // Engage HDG mode only when it is currently OFF (status 0).
-            // Status 2 = captured; re-sending the command would TOGGLE it
-            // off, so gate on the observed status.
-            if self.value(DataRefId::ApHeadingStatus).unwrap_or(0.0) < 2.0 {
-                let _ = self.engage(Command::ApHeadingHold);
-            }
+            self.last_control_error = Some(e.to_string());
         }
     }
 
     fn set_target_vertical_speed(&mut self, fpm: f64) {
-        if self
-            .write_ap(WriteRef::ApVerticalVelocity, fpm as f32)
-            .is_ok()
+        let Some(v) = self.checked_target("vertical_speed", fpm) else {
+            return;
+        };
+        if let Err(e) = self.write_ap(WriteRef::ApVerticalVelocity, v as f32) {
+            self.last_control_error = Some(e.to_string());
+            return;
+        }
+        if self.value(DataRefId::ApVviStatus).unwrap_or(0.0) < 2.0
+            && let Err(e) = self.engage(Command::ApVerticalSpeedPreSel)
         {
-            if self.value(DataRefId::ApVviStatus).unwrap_or(0.0) < 2.0 {
-                let _ = self.engage(Command::ApVerticalSpeedPreSel);
-            }
+            self.last_control_error = Some(e.to_string());
         }
     }
 }
@@ -304,5 +385,11 @@ mod tests {
     fn unit_conversions() {
         assert!((2000.0f64 * M_TO_FT - 6561.68).abs() < 0.01);
         assert!((100.0f64 * MS_TO_KT - 194.38).abs() < 0.01);
+    }
+
+    #[test]
+    fn epoch_ms_is_sane() {
+        // Post-2020 wall clock, in ms.
+        assert!(epoch_ms() > 1_600_000_000_000);
     }
 }

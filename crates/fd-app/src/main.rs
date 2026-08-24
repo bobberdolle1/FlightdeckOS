@@ -78,6 +78,10 @@ enum Command {
         /// Seconds to wait for the FIRST telemetry packet (XP boot window).
         #[arg(long, default_value_t = 240)]
         wait_first_secs: u64,
+        /// Operator-claimed aircraft ICAO (stock UDP cannot read identity
+        /// strings; recorded with UserProvided provenance, never trusted).
+        #[arg(long)]
+        aircraft_icao: Option<String>,
     },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
@@ -128,12 +132,14 @@ fn main() -> anyhow::Result<()> {
             set_heading_true,
             set_vs_fpm,
             wait_first_secs,
+            aircraft_icao,
         } => run_xplane_live(
             port,
             monitor_secs,
             set_heading_true,
             set_vs_fpm,
             wait_first_secs,
+            aircraft_icao,
         ),
         Command::Replay {
             fixture,
@@ -633,8 +639,11 @@ fn run_xplane_live(
     set_heading_true: Option<f64>,
     set_vs_fpm: Option<f64>,
     wait_first_secs: u64,
+    aircraft_icao: Option<String>,
 ) -> anyhow::Result<()> {
     use fd_core::adapter::{FlightControlTargets, SimulatorAdapter};
+    use fd_core::capability::{CapabilityReport, CapabilityStatus, EvidenceSource};
+    use fd_core::identity::AircraftIdentity;
     use fd_xplane::{XPlaneAdapter, XPlaneConfig};
 
     println!("XPLANE LIVE SMOKE (native UDP transport)");
@@ -643,8 +652,12 @@ fn run_xplane_live(
         port,
         subscribe_hz: 4,
     };
-    let mut adapter =
-        XPlaneAdapter::new(cfg).map_err(|e| anyhow::anyhow!("adapter init failed: {e}"))?;
+    let identity = match aircraft_icao {
+        Some(icao) => AircraftIdentity::user_provided(Some(icao)),
+        None => AircraftIdentity::unknown(),
+    };
+    let mut adapter = XPlaneAdapter::with_identity(cfg, identity)
+        .map_err(|e| anyhow::anyhow!("adapter init failed: {e}"))?;
 
     print!("waiting for first telemetry packet from 127.0.0.1:{port} .. ");
     if !adapter.wait_first_packet(std::time::Duration::from_secs(wait_first_secs)) {
@@ -660,6 +673,46 @@ fn run_xplane_live(
         "TRANSPORT_CONNECTED: udp rx {} pkts so far",
         adapter.packets_received()
     );
+    let id = adapter.identity();
+    println!(
+        "AIRCRAFT_IDENTITY: icao={} source={} trusted={}",
+        id.icao.as_deref().unwrap_or("(unknown)"),
+        match id.source {
+            fd_core::identity::IdentitySource::Unknown => "unknown",
+            fd_core::identity::IdentitySource::UserProvided => "user_provided",
+            fd_core::identity::IdentitySource::Adapter => "adapter",
+        },
+        id.is_trusted()
+    );
+    let mut caps = CapabilityReport::new();
+    caps.set_with_evidence(
+        "telemetry.position",
+        CapabilityStatus::Supported,
+        EvidenceSource::LiveXplane,
+    );
+    caps.set_with_evidence(
+        "telemetry.attitude",
+        CapabilityStatus::Supported,
+        EvidenceSource::LiveXplane,
+    );
+    caps.set_with_evidence(
+        "fdr.recording",
+        CapabilityStatus::Supported,
+        EvidenceSource::LiveXplane,
+    );
+    caps.set_with_evidence(
+        "action.discrete",
+        CapabilityStatus::Unsupported,
+        EvidenceSource::LiveXplane,
+    );
+    for e in caps.entries_sorted() {
+        println!(
+            "CAPABILITY: {:<24} {:<12} {}",
+            e.path,
+            e.status.as_str(),
+            e.evidence.as_str()
+        );
+    }
 
     let mut last_heading_cmd: Option<(f64, std::time::Instant)> = None;
     let mut last_vs_cmd: Option<(f64, std::time::Instant)> = None;
