@@ -16,8 +16,10 @@
 //! * `GET /api/v3/{datarefs|commands}?filter[name]=<exact>` → `{data:[...]}`
 //! * `GET /api/v3/datarefs/{id}/value` → `{data: <value>}`
 //! * `PATCH /api/v3/datarefs/{id}/value` body `{"data": v}`
-//! * command activation: `POST /api/v3/commands/{id}/activate` (observed
-//!   live; not yet in the published endpoint table)
+//! * command activation: `POST /api/v3/command/{id}/activate` (v2+
+//!   singular path, required `{"duration": s}` body — observed live on
+//!   X-Plane 12.4.3; the plural `/commands/.../activate` route does not
+//!   exist and returns a bare drogon 404)
 //! * errors: HTTP != 2xx with `{error_code, error_message}`
 
 use std::collections::HashMap;
@@ -346,19 +348,22 @@ impl<T: WebApiTransport> WebApiClient<T> {
         parse_unit(status, &body).map_err(|e| self.on_possible_session_expiry(name, id, e))
     }
 
+    /// How long an activated command stays active before the simulator
+    /// auto-deactivates it (seconds). Long enough for the command handler
+    /// to observe `begin`, short enough to stay one-shot (spec §31).
+    const COMMAND_PRESS_SECONDS: f64 = 0.1;
     /// Activate a command ONCE by NAME (one-shot press/release; spec §31 —
     /// no held/overlapping activations in this milestone).
     pub fn activate_command(&mut self, name: &str) -> Result<(), WebApiError> {
-        let id = match self.resolve_command(name) {
-            Ok(id) => id,
-            Err(WebApiError::ResourceNotFound(n)) => return Err(WebApiError::ResourceNotFound(n)),
-            Err(e) => return Err(e),
-        };
-        let path = format!("/api/v3/commands/{id}/activate");
+        let id = self.resolve_command(name)?;
+        // One-shot press: `begin` fires immediately (the switch flips),
+        // the command auto-deactivates after [`COMMAND_PRESS_SECONDS`].
+        let path = format!("/api/v3/command/{id}/activate");
+        let payload = format!(r#"{{"duration":{}}}"#, Self::COMMAND_PRESS_SECONDS);
         let (status, body) = self
             .transport
-            .request(HttpMethod::Post, &path, Some("{}"))?;
-        parse_unit(status, &body)
+            .request(HttpMethod::Post, &path, Some(&payload))?;
+        parse_unit(status, &body).map_err(|e| self.on_possible_session_expiry(name, id, e))
     }
 
     /// Session-expiry detection (spec §8/§28): a 404 for a previously
@@ -686,8 +691,8 @@ mod tests {
         // activate (POST with the session id in the path).
         let seen = c.transport.seen_of_last();
         assert!(
-            seen.contains("/api/v3/commands/42/activate"),
-            "activation must POST to the resolved session id: {seen}"
+            seen.contains("/api/v3/command/42/activate"),
+            "activation must POST to the singular v2+ activate route with the resolved session id: {seen}"
         );
     }
 
