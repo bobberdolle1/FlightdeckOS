@@ -48,6 +48,7 @@ pub struct XPlaneVersion {
 }
 
 /// A dataref or command resource as returned by enumeration.
+#[allow(dead_code)] // verification-data path for the next action lane; unit-tested
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DatarefResource {
     pub id: u64,
@@ -64,6 +65,7 @@ pub struct CommandResource {
     pub description: Option<String>,
 }
 
+#[allow(dead_code)] // verification-data path for the next action lane; unit-tested
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatarefValue {
     Number(f64),
@@ -76,6 +78,7 @@ pub enum DatarefValue {
 
 impl DatarefValue {
     /// Numeric view (float/double/int); `None` for non-numeric kinds.
+    #[allow(dead_code)]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Number(v) => Some(*v),
@@ -118,6 +121,7 @@ pub enum WebApiError {
 /// Minimal HTTP surface so tests can inject deterministic faults
 /// (REST 500, timeout, malformed body) without a network (spec §34).
 pub trait WebApiTransport {
+    #[allow(dead_code)] // convenience for future GET-only probes
     fn get(&self, path: &str) -> Result<u16, WebApiError>;
     /// Perform a request, returning (status, body). `body` is `None` for
     /// body-less requests.
@@ -191,6 +195,7 @@ impl WebApiTransport for HttpTransport {
 
 /// Session cache: stable NAME → current-session numeric id.
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)] // session introspection used by tests + future lanes
 pub struct ResourceSession {
     datarefs: HashMap<String, u64>,
     commands: HashMap<String, u64>,
@@ -213,10 +218,12 @@ impl ResourceSession {
         self.datarefs.insert(name.to_string(), id);
     }
 
+    #[allow(dead_code)] // session introspection for tests/diagnostics
     pub fn len(&self) -> usize {
         self.datarefs.len() + self.commands.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -254,6 +261,7 @@ impl<T: WebApiTransport> WebApiClient<T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn session(&self) -> &ResourceSession {
         &self.session
     }
@@ -298,6 +306,7 @@ impl<T: WebApiTransport> WebApiClient<T> {
     }
 
     /// Resolve a dataref NAME to the current-session numeric id.
+    #[allow(dead_code)]
     pub fn resolve_dataref(&mut self, name: &str) -> Result<u64, WebApiError> {
         if let Some(id) = self.session.cached_dataref(name) {
             return Ok(id);
@@ -315,6 +324,7 @@ impl<T: WebApiTransport> WebApiClient<T> {
     }
 
     /// Read a dataref value by NAME (resolving through the session cache).
+    #[allow(dead_code)]
     pub fn read_dataref(&mut self, name: &str) -> Result<DatarefValue, WebApiError> {
         let id = self.resolve_dataref(name)?;
         let path = format!("/api/v3/datarefs/{id}/value");
@@ -325,6 +335,7 @@ impl<T: WebApiTransport> WebApiClient<T> {
 
     /// Write a numeric dataref value by NAME. Adapter-internal only —
     /// NEVER exposed above the typed action layer (spec §7).
+    #[allow(dead_code)]
     pub fn write_dataref_f64(&mut self, name: &str, value: f64) -> Result<(), WebApiError> {
         let id = self.resolve_dataref(name)?;
         let path = format!("/api/v3/datarefs/{id}/value");
@@ -332,7 +343,7 @@ impl<T: WebApiTransport> WebApiClient<T> {
         let (status, body) = self
             .transport
             .request(HttpMethod::Patch, &path, Some(&payload))?;
-        parse_unit(status, &body)
+        parse_unit(status, &body).map_err(|e| self.on_possible_session_expiry(name, id, e))
     }
 
     /// Activate a command ONCE by NAME (one-shot press/release; spec §31 —
@@ -350,12 +361,38 @@ impl<T: WebApiTransport> WebApiClient<T> {
         parse_unit(status, &body)
     }
 
+    /// Session-expiry detection (spec §8/§28): a 404 for a previously
+    /// resolved id means the simulator session changed and the cached id
+    /// is dead. Evict it and report `SessionExpired` so the next attempt
+    /// re-resolves by NAME — a stale id can never poison the cache.
+    fn on_possible_session_expiry(
+        &mut self,
+        name: &str,
+        used_id: u64,
+        err: WebApiError,
+    ) -> WebApiError {
+        let cached = self
+            .session
+            .cached_command(name)
+            .or_else(|| self.session.cached_dataref(name));
+        match (&err, cached) {
+            (WebApiError::Api { http: 404, .. }, Some(cached_id)) if cached_id == used_id => {
+                self.forget_command(name);
+                self.forget_dataref(name);
+                WebApiError::SessionExpired(format!("{name} (id {used_id} no longer valid)"))
+            }
+            _ => err,
+        }
+    }
+
     /// Drop a single cached id after the simulator rejected it (e.g. 404
     /// on a previously valid id): the session partially expired.
+    #[allow(dead_code)]
     pub fn forget_command(&mut self, name: &str) {
         self.session.commands.remove(name);
     }
 
+    #[allow(dead_code)]
     pub fn forget_dataref(&mut self, name: &str) {
         self.session.datarefs.remove(name);
     }

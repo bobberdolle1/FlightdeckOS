@@ -124,6 +124,14 @@ impl XPlaneAdapter {
         std::sync::Arc::clone(&self.write_guard)
     }
 
+    /// Best-effort simulator version through the Local Web API
+    /// (`GET /api/capabilities`). `None` when the API is unavailable —
+    /// telemetry does not depend on it.
+    pub fn simulator_version(&mut self) -> Option<String> {
+        let web = self.web.as_mut()?;
+        web.capabilities().ok().map(|c| c.x_plane.version)
+    }
+
     /// Current beacon state as observed over UDP telemetry (None = unknown).
     pub fn beacon_state(&self) -> Option<bool> {
         self.value(DataRefId::BeaconOn).map(|v| v > 0.5)
@@ -198,7 +206,11 @@ impl XPlaneAdapter {
     }
 
     /// Send an allowlisted autopilot write (used by `FlightControlTargets`).
+    /// Behind the SAME live-write guard as discrete actions (spec §14):
+    /// AP-target datagrams are simulator writes and must never fire from
+    /// an un-armed process.
     fn write_ap(&self, r: WriteRef, value: f32) -> Result<(), AdapterError> {
+        self.write_guard.ensure_armed()?;
         self.guard_connected()?;
         self.client
             .write_dref(r.path(), value)
@@ -206,6 +218,7 @@ impl XPlaneAdapter {
     }
 
     fn engage(&self, c: Command) -> Result<(), AdapterError> {
+        self.write_guard.ensure_armed()?;
         self.guard_connected()?;
         self.client
             .send_command(c.path())

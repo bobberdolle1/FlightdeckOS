@@ -714,6 +714,11 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
     adapter
         .connect()
         .map_err(|e| anyhow::anyhow!("connect failed: {e}"))?;
+    let sim_version = adapter.simulator_version();
+    println!(
+        "SIMULATOR: X-Plane {}",
+        sim_version.as_deref().unwrap_or("(web api unavailable)")
+    );
     println!(
         "WRITE_GUARD: {}",
         if adapter.write_guard().is_armed() {
@@ -851,7 +856,7 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
         let meta = fd_fdm::fdr::FdrSessionMeta {
             session_id: format!("live-{}", started_wall.unwrap_or(0)),
             simulator: "X-Plane 12".into(),
-            sim_version: None, // filled after the loop via Web API probe
+            sim_version: sim_version.clone(),
             aircraft: adapter.identity().clone(),
             fdos_version: env!("CARGO_PKG_VERSION").into(),
             adapter_source: Some("xplane-udp".into()),

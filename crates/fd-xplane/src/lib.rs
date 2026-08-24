@@ -19,8 +19,9 @@ pub mod client;
 pub mod guard;
 pub mod protocol;
 pub mod refs;
-pub mod webapi;
+mod webapi;
 
 pub use adapter::{BEACON_OFF_COMMAND, BEACON_ON_COMMAND, XPlaneAdapter, XPlaneConfig};
 pub use client::XPlaneUdpClient;
+pub use guard::LiveWriteGuard;
 pub use refs::DataRefId;
