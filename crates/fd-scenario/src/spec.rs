@@ -54,6 +54,9 @@ pub struct ScenarioSpec {
     #[serde(default)]
     pub mission: MissionSpec,
     pub simulation: SimulationSpec,
+    /// Deterministic fault injection (spec §41); omit for nominal runs.
+    #[serde(default)]
+    pub faults: Option<fd_virtual::faults::FaultConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +69,11 @@ pub struct ScenarioHeader {
     /// Optional flow id to start from the package.
     #[serde(default)]
     pub flow: Option<String>,
+    /// Negative scenario: the run PASSES only when the mission FAILS
+    /// (or times out) as expected. A nominal PASS is reported as a
+    /// scenario failure ("expected failure did not occur").
+    #[serde(default)]
+    pub expected_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
