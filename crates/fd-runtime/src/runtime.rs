@@ -393,6 +393,9 @@ mod tests {
         let adapter = ReplayAdapter::new(vec![
             ReplayStep::Snapshot(beacon_snap(0, false, false)),
             ReplayStep::Snapshot(beacon_snap(1000, true, false)),
+            // Spec §22: verification consumes a sample strictly newer than
+            // the dispatch boundary — a third tick supplies it.
+            ReplayStep::Snapshot(beacon_snap(2000, true, false)),
         ]);
         let trace = TraceWriter::create(trace_path(&dir, "t.jsonl")).unwrap();
         let mut rt = Runtime::new(
@@ -413,6 +416,8 @@ mod tests {
             SimTimestamp::new(500),
         )
         .unwrap();
+        rt.tick(EventSource::Replay).unwrap();
+        // Third tick: fresh post-dispatch observation verifies.
         rt.tick(EventSource::Replay).unwrap();
         rt.finish().unwrap();
 

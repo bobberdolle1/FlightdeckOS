@@ -42,6 +42,11 @@ pub struct ActionRecord {
     /// Verifier assigned during validation (from the catalog entry).
     verify: Option<VerifyFn>,
     ticks_since_dispatch: u64,
+    /// Simulator timestamp at the moment the command was dispatched.
+    /// Verification (spec §22) may only consume snapshots STRICTLY NEWER
+    /// than this boundary — a pre-dispatch observation can never confirm
+    /// the post-condition, even when it already shows the target state.
+    dispatched_ts_ms: u64,
 }
 
 impl ActionRecord {
@@ -51,6 +56,7 @@ impl ActionRecord {
             status: ActionStatus::Requested,
             verify: None,
             ticks_since_dispatch: 0,
+            dispatched_ts_ms: 0,
         }
     }
 }
@@ -178,6 +184,7 @@ impl ActionExecutor {
                         Ok(()) => {
                             rec.status = ActionStatus::Dispatched;
                             rec.ticks_since_dispatch = 0;
+                            rec.dispatched_ts_ms = snapshot.timestamp.ms;
                             progressed = true;
                             events.push(TraceEvent::ActionDispatched {
                                 seq: placeholder,
@@ -207,10 +214,21 @@ impl ActionExecutor {
                         if !paused {
                             rec.ticks_since_dispatch += 1;
                         }
+                        // Freshness gate (spec §22): a snapshot captured at
+                        // or before the dispatch boundary is pre-dispatch
+                        // state, not post-condition evidence. It yields no
+                        // verification result — but the deadline keeps
+                        // running, so a stalled feed still times out.
+                        let fresh = snapshot.timestamp.ms > rec.dispatched_ts_ms;
                         let verify = rec
                             .verify
                             .expect("validated action always carries its verifier");
-                        match verify(rec.request.action, snapshot) {
+                        let verify_result = if fresh {
+                            verify(rec.request.action, snapshot)
+                        } else {
+                            None // no admissible evidence yet
+                        };
+                        match verify_result {
                             Some(true) => {
                                 progressed = true;
                                 self.completed
@@ -379,22 +397,58 @@ mod tests {
     }
 
     #[test]
-    fn already_satisfied_action_verifies_in_single_tick() {
+    fn already_satisfied_action_verifies_on_fresh_snapshot() {
         let mut ex = ActionExecutor::new(DeadlineTicks(3));
         let cat = test_catalog();
         let mut adapter = ReplayAdapter::new(Vec::new());
         submit_beacon(&mut ex, 0);
 
-        // Snapshot already shows beacon ON: validate+dispatch+verify at once.
+        // Snapshot already shows beacon ON: validate+dispatch happen, but
+        // the pre-dispatch observation must NOT verify the post-condition
+        // (spec §22) — verification waits for a strictly newer sample.
         let on = snapshot_with_beacon(10, Some(true));
         let evts = ex.advance(&cat, &mut adapter, &on);
-        for kind in ["action_validated", "action_dispatched", "action_verified"] {
+        for kind in ["action_validated", "action_dispatched"] {
             assert!(
                 evts.iter().any(|e| serde_kind(e) == kind),
                 "missing {kind} in {evts:?}"
             );
         }
+        assert!(
+            !evts.iter().any(|e| serde_kind(e) == "action_verified"),
+            "pre-dispatch state must never verify the post-condition"
+        );
+        assert_eq!(ex.pending_count(), 1);
+
+        // Fresh post-dispatch observation (same state, newer sim time).
+        let on_fresh = snapshot_with_beacon(20, Some(true));
+        let evts = ex.advance(&cat, &mut adapter, &on_fresh);
+        assert!(
+            evts.iter().any(|e| serde_kind(e) == "action_verified"),
+            "fresh post-dispatch observation verifies: {evts:?}"
+        );
         assert_eq!(ex.pending_count(), 0);
+    }
+
+    #[test]
+    fn stale_pre_dispatch_state_change_does_not_verify() {
+        // The target state appearing in a PRE-dispatch snapshot (ts <=
+        // dispatch boundary) is not evidence; only a newer sample counts.
+        let mut ex = ActionExecutor::new(DeadlineTicks(5));
+        let cat = test_catalog();
+        let mut adapter = ReplayAdapter::new(Vec::new());
+        submit_beacon(&mut ex, 0);
+
+        let off = snapshot_with_beacon(10, Some(false));
+        let _ = ex.advance(&cat, &mut adapter, &off); // validate+dispatch
+        // Same-timestamp snapshot (e.g. duplicate poll): must NOT verify.
+        let dup = snapshot_with_beacon(10, Some(true));
+        let evts = ex.advance(&cat, &mut adapter, &dup);
+        assert!(!evts.iter().any(|e| serde_kind(e) == "action_verified"));
+        // Strictly newer sample verifies.
+        let fresh = snapshot_with_beacon(30, Some(true));
+        let evts = ex.advance(&cat, &mut adapter, &fresh);
+        assert!(evts.iter().any(|e| serde_kind(e) == "action_verified"));
     }
 
     #[test]
