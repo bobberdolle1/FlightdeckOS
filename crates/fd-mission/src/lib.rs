@@ -13,6 +13,9 @@ pub mod controller;
 pub mod route;
 pub mod shadow;
 
+pub mod intents;
+pub mod monitor;
+pub mod runway;
 pub use controller::{
     MissionCommands, MissionContext, MissionController, MissionParameters, MissionPhase,
     intended_commands, intended_next_phase,

@@ -27,6 +27,26 @@ pub enum MissionPhase {
     Failed,
 }
 
+impl MissionPhase {
+    /// Stable snake_case identifier (mirrors the serde representation),
+    /// used as the aggregation key in shadow summaries and observability
+    /// counters.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::Takeoff => "takeoff",
+            Self::Climb => "climb",
+            Self::Cruise => "cruise",
+            Self::Descent => "descent",
+            Self::Approach => "approach",
+            Self::Landing => "landing",
+            Self::Parked => "parked",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Inputs the controller reads each tick.
 pub struct MissionContext<'a> {
     pub snapshot: &'a TelemetrySnapshot,
@@ -76,6 +96,11 @@ impl Default for MissionParameters {
         }
     }
 }
+
+/// DEVELOPMENT DEFAULT: fixed commanded descent rate (fpm) at top-of-descent
+/// and during descent. Shared with [`crate::intents`], which recognizes the
+/// descent trigger by this exact commanded value — one decision source.
+pub const DESCENT_VS_FPM: f64 = -1800.0;
 
 /// Development model: fixed climb-out vertical speed (fpm).
 const fn climb_out_vs_fpm() -> f64 {
@@ -138,7 +163,7 @@ fn intended_tick(
             if ctx.distance_to_destination_nm <= params.descent_distance_nm {
                 next_phase = Some(MissionPhase::Descent);
                 cmds.set_target_altitude_ft = Some(approach_elevation_estimate_ft());
-                cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+                cmds.set_target_vertical_speed_fpm = Some(DESCENT_VS_FPM);
             } else if let Some(alt) = snap.altitude_msl.map(|v| v.value())
                 && (alt - params.cruise_altitude_ft).abs() <= 200.0
             {
@@ -154,12 +179,12 @@ fn intended_tick(
             if ctx.distance_to_destination_nm <= params.descent_distance_nm {
                 next_phase = Some(MissionPhase::Descent);
                 cmds.set_target_altitude_ft = Some(approach_elevation_estimate_ft());
-                cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+                cmds.set_target_vertical_speed_fpm = Some(DESCENT_VS_FPM);
             }
         }
         MissionPhase::Descent => {
             cmds.set_target_speed_kt = Some(params.approach_speed_kt.max(200.0));
-            cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+            cmds.set_target_vertical_speed_fpm = Some(DESCENT_VS_FPM);
             cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
             if let Some(alt) = snap.altitude_msl.map(|v| v.value()) {
                 if alt > 5_000.0 {
