@@ -847,32 +847,37 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
 
     // Live FDR session (spec §20): normalized telemetry + real phase
     // engine + FDM analysis, session metadata on exit.
-    let mut fdr = fdr_out.map(|path| {
-        let rec = fd_fdm::fdr::Recorder::new();
-        let started_wall = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_millis() as u64);
-        let meta = fd_fdm::fdr::FdrSessionMeta {
-            session_id: format!("live-{}", started_wall.unwrap_or(0)),
-            simulator: "X-Plane 12".into(),
-            sim_version: sim_version.clone(),
-            aircraft: adapter.identity().clone(),
-            fdos_version: env!("CARGO_PKG_VERSION").into(),
-            adapter_source: Some("xplane-udp".into()),
-            started_wall_unix_ms: started_wall,
-            ended_wall_unix_ms: None,
-            origin: None,
-            destination: None,
-            started_ms: 0,
-            ended_ms: None,
-        };
-        let rec = rec.with_meta(meta);
-        (rec, path)
-    });
+    let mut fdr = fdr_out
+        .map(|path| {
+            let started_wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as u64);
+            let meta = fd_fdm::fdr::FdrSessionMeta {
+                session_id: format!("live-{}", started_wall.unwrap_or(0)),
+                simulator: "X-Plane 12".into(),
+                sim_version: sim_version.clone(),
+                aircraft: adapter.identity().clone(),
+                fdos_version: env!("CARGO_PKG_VERSION").into(),
+                adapter_source: Some("xplane-udp".into()),
+                started_wall_unix_ms: started_wall,
+                ended_wall_unix_ms: None,
+                origin: None,
+                destination: None,
+                started_ms: 0,
+                ended_ms: None,
+            };
+            // V2 streamed JSONL (Task 6 §13): crash-safe, torn-tail
+            // recoverable; flushes every 32 samples.
+            fd_fdm::fdr::StreamedRecorder::create(&path, &meta)
+                .map(|w| (w, path))
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .transpose()?;
     let mut phase_engine = fd_core::phase::FlightPhaseEngine::new();
     let mut fdm_live = fd_fdm::fdm::FdmAnalyzer::new_development_default();
-    let mut recording = fd_fdm::fdr::FlightRecording::default();
+    let mut fdr_seq = fd_fdm::fdr::Recorder::new();
+    let mut session = fd_fdm::session::SessionTracker::new();
     let mut fdr_events = 0u64;
 
     let mut last_heading_cmd: Option<(f64, std::time::Instant)> = None;
@@ -926,19 +931,30 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
                 last_hz_t = std::time::Instant::now();
                 hz
             };
-            if let Some((rec, _)) = fdr.as_mut() {
+            if let Some((w, _)) = fdr.as_mut() {
                 let assessment = phase_engine.evaluate(&fd_core::phase::PhaseTelemetry::from(&s));
-                let sample = rec.record(&s, assessment.phase.as_str());
+                let sample = fdr_seq.record(&s, assessment.phase.as_str());
                 for ev in fdm_live.process(&sample) {
                     fdr_events += 1;
-                    recording.push_event(fd_fdm::fdr::FdrEvent {
+                    w.record_event(&fd_fdm::fdr::FdrEvent {
                         seq: fdr_events,
                         timestamp: sample.timestamp,
                         kind: "fdm".into(),
                         detail: format!("{:?} measured={:.0}", ev.kind, ev.measured),
-                    });
+                    })
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
-                recording.push_sample(sample);
+                w.record_sample(&sample)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                session.advance(fd_fdm::session::SessionEvidence {
+                    connected: true,
+                    identity_known: adapter.identity().icao.is_some(),
+                    sample_recorded: true,
+                    altitude_agl_ft: s.altitude_agl.map(|v| v.value()),
+                    on_ground: s.on_ground,
+                    groundspeed_kt: s.groundspeed.map(|v| v.value()),
+                    descending: s.vertical_speed.map(|v| v.value() < -100.0),
+                });
             }
             println!(
                 "[t={:>5.1}s {:>4.0}Hz] lat={:<10} lon={:<10} msl={:>7.0}ft agl={:>7.0}ft ias={:>6.1} gs={:>6.1} vs={:>7.1} hdg={:>6.1} gnd={} ap={} pkt_age={:?}",
@@ -985,34 +1001,15 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
         adapter.packets_received(),
         adapter.disconnect_count()
     );
-    if let Some((rec, path)) = fdr {
-        let ended_wall = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_millis() as u64);
-        let ended = ended_wall;
-        let mut recording = std::mem::take(&mut recording);
-        // Stamp ended wall time into the meta we attached at start.
-        if let Some(m) = recording.meta.as_mut() {
-            m.ended_wall_unix_ms = ended;
-        }
-        let finished = rec.finish(recording);
-        match serde_json::to_string_pretty(&finished) {
-            Ok(json) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(&path, json).map_err(|e| anyhow::anyhow!("fdr write: {e}"))?;
-                println!(
-                    "FDR_SESSION: {} samples={} events={} -> {}",
-                    finished.samples.len(),
-                    finished.samples.len(),
-                    finished.events.len(),
-                    path.display()
-                );
-            }
-            Err(e) => return Err(anyhow::anyhow!("fdr serialize: {e}")),
-        }
+    if let Some((mut w, path)) = fdr {
+        w.finish().map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!(
+            "FDR_SESSION: samples={} events={} -> {} (v2 jsonl)",
+            w.samples_written(),
+            w.events_written(),
+            path.display()
+        );
+        println!("SESSION_LIFECYCLE: {:?}", session.state());
     }
     Ok(())
 }

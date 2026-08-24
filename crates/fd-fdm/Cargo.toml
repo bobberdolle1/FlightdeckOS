@@ -6,8 +6,10 @@ license.workspace = true
 description = "FlightdeckOS flight-data layer: FDR recorder, development-grade FDM events, Quality of Approach / Quality of Landing metrics"
 
 [dependencies]
+thiserror = { workspace = true }
 fd-core = { path = "../fd-core" }
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tempfile.workspace = true

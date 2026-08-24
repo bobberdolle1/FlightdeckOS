@@ -211,8 +211,8 @@ fn record_at(prev_airborne: &FdrSample, touchdown: &FdrSample) -> TouchdownRecor
 /// FDR samples do not yet carry geographic position (FDR V2 field, landed
 /// at Integration); until then NO recording can produce a position here and
 /// the result is always `None`. Coordinates are never fabricated.
-fn sample_position(_s: &FdrSample) -> Option<(f64, f64)> {
-    None
+fn sample_position(s: &FdrSample) -> Option<(f64, f64)> {
+    s.position.as_ref().map(|p| (p.lat.value(), p.lon.value()))
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ members = [
     "crates/fd-app",
     "crates/fd-openairac",
     "crates/fd-crew",
+    "crates/fd-debrief",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ serde_json = "1.0"
 thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

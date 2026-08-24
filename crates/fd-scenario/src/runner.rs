@@ -12,7 +12,7 @@ use fd_core::events::EventSource;
 use fd_core::telemetry::TelemetrySnapshot;
 use fd_fdm::fdm::FdmAnalyzer;
 use fd_fdm::fdr::{FdrEvent, FlightRecording, Recorder};
-use fd_fdm::qoa::{ApproachAnalyzer, StabilizationCriteria};
+use fd_fdm::qoa::{ApproachAnalyzer, GateClassification, StabilizationCriteria};
 use fd_fdm::qol;
 use fd_mission::controller::{MissionContext, MissionController, MissionParameters, MissionPhase};
 use fd_mission::route::RouteFollower;
@@ -258,20 +258,23 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
     let approach_summary: Option<ApproachSummary> = qoa_analyzer.map(|a| {
         let r = a.finish();
         ApproachSummary {
+            // Gate classification: Stable=true, Unstable=false,
+            // Indeterminate/crossed-unknown=None (never fabricated as
+            // stable — Task 6 §25).
             stabilized_at_1000ft: r
-                .gates
+                .classifications
                 .first()
                 .copied()
                 .flatten()
-                .map(|g| g.stabilized.unwrap_or(false)),
+                .map(|c| c == GateClassification::Stable),
             stabilized_at_500ft: r
-                .gates
+                .classifications
                 .get(1)
                 .copied()
                 .flatten()
-                .map(|g| g.stabilized.unwrap_or(false)),
+                .map(|c| c == GateClassification::Stable),
             max_sink_rate_fpm: r.max_sink_rate_fpm,
-            go_around_detected: r.go_around_detected,
+            go_around_detected: r.go_around.as_ref().map(|_| true),
         }
     });
     let landing_report = qol::analyze(&recording.samples);
@@ -368,9 +371,9 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         }
     };
     let landing_summary = LandingSummary {
-        touchdown_occurred: landing_report.timestamp_ms.is_some(),
-        touchdown_vertical_speed_fpm: landing_report.touchdown_vertical_speed_fpm,
-        touchdown_pitch_deg: landing_report.touchdown_pitch_deg,
+        touchdown_occurred: landing_report.touchdown.is_some(),
+        touchdown_vertical_speed_fpm: landing_report.touchdown.as_ref().and_then(|t| t.vs_fpm),
+        touchdown_pitch_deg: landing_report.touchdown.as_ref().and_then(|t| t.pitch_deg),
     };
 
     let mut fdm_summary: Vec<FdmEventSummary> = Vec::new();
