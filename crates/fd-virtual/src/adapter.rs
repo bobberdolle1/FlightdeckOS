@@ -17,6 +17,7 @@ use fd_core::adapter::{AdapterError, Capability, FlightControlTargets, Simulator
 use fd_core::telemetry::{SimState, SimTimestamp, TelemetrySnapshot};
 use fd_core::units::{AltitudeAglFt, AltitudeFt, AngleDeg, SpeedKt, VerticalSpeedFpm};
 
+use crate::faults::FaultConfig;
 use crate::VirtualClock;
 use crate::kinematics::{KinematicLimits, KinematicState};
 use crate::systems::SystemsState;
@@ -26,6 +27,8 @@ pub struct VirtualSimulator {
     clock: VirtualClock,
     kinematics: KinematicState,
     systems: SystemsState,
+    /// Deterministic fault injection (spec §41); `Default` = no faults.
+    faults: FaultConfig,
 }
 
 impl VirtualSimulator {
@@ -35,21 +38,33 @@ impl VirtualSimulator {
         lon_deg: f64,
         ground_elevation_ft: f64,
         initial_heading_deg: f64,
-        dt_ms: u64,
-    ) -> Self {
-        let mut kinematics = KinematicState::new(
-            lat_deg,
-            lon_deg,
-            ground_elevation_ft,
-            KinematicLimits::default(),
-        );
-        kinematics.set_target_heading(initial_heading_deg);
-        kinematics.heading_deg = initial_heading_deg.rem_euclid(360.0);
         Self {
             clock: VirtualClock::new(dt_ms),
             kinematics,
             systems: SystemsState::cold_and_dark(),
+            faults: FaultConfig::default(),
         }
+    }
+
+    /// Attach a deterministic fault-injection configuration (builder style).
+    ///
+    /// Panics when `faults.unknown_sensor_fields` names a field outside the
+    /// closed [`crate::faults::MASKABLE_FIELDS`] set — that is a programmer
+    /// error we want to fail on at construction time, not silently ignore
+    /// mid-scenario. Scenario files should validate first via
+    /// `FaultConfig::validate` to surface the error as data instead.
+    #[must_use]
+    pub fn with_faults(mut self, faults: FaultConfig) -> Self {
+        if let Err(e) = faults.validate() {
+            panic!("invalid FaultConfig: {e}");
+        }
+        self.faults = faults;
+        self
+    }
+
+    /// Read-only access to the active fault configuration.
+    pub const fn faults(&self) -> &FaultConfig {
+        &self.faults
     }
 
     /// Simulated timestamp of the CURRENT state.

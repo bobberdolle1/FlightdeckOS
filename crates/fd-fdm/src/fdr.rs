@@ -5,6 +5,7 @@
 //! stay unknown (serialized as `null`). Ordering is strictly insertion
 //! order — the recorder adds nothing and reorders nothing.
 
+use fd_core::identity::AircraftIdentity;
 use fd_core::telemetry::{SimTimestamp, TelemetrySnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +45,43 @@ pub struct FdrEvent {
     pub detail: String,
 }
 
+/// Session-level metadata attached to a recording (spec §19).
+///
+/// Pure data supplied by the caller — the recorder never reads a wall
+/// clock, so identical inputs still produce identical recordings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FdrSessionMeta {
+    /// Caller-chosen unique session identifier.
+    pub session_id: String,
+    /// Simulator product name (e.g. `"X-Plane 12"`).
+    pub simulator: String,
+    /// Simulator version string, when known.
+    #[serde(default)]
+    pub sim_version: Option<String>,
+    /// Aircraft identity claim with provenance.
+    pub aircraft: AircraftIdentity,
+    /// FlightdeckOS version that produced this recording.
+    pub fdos_version: String,
+    /// Departure airport ICAO, when known.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Destination airport ICAO, when known.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Session start in sim milliseconds (caller-supplied).
+    pub started_ms: u64,
+    /// Session end in sim milliseconds; `None` while the session is open.
+    #[serde(default)]
+    pub ended_ms: Option<u64>,
+}
+
 /// The recording itself. Deterministic: same input sequence ⇒ same output.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FlightRecording {
+    /// Session metadata (spec §19). Absent (`None`) in legacy recordings;
+    /// old JSON without this key still deserializes.
+    #[serde(default)]
+    pub meta: Option<FdrSessionMeta>,
     pub samples: Vec<FdrSample>,
     pub events: Vec<FdrEvent>,
 }
@@ -76,11 +111,24 @@ impl FlightRecording {
 #[derive(Debug, Default)]
 pub struct Recorder {
     next_seq: u64,
+    meta: Option<FdrSessionMeta>,
 }
 
 impl Recorder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach session metadata to be stamped on finished recordings
+    /// (builder style).
+    pub fn with_meta(mut self, meta: FdrSessionMeta) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+
+    /// Session metadata attached to this recorder, if any.
+    pub fn meta(&self) -> Option<&FdrSessionMeta> {
+        self.meta.as_ref()
     }
 
     /// Convert one canonical snapshot into an ordered FDR sample.
@@ -120,6 +168,26 @@ impl Recorder {
     pub const fn samples_recorded(&self) -> u64 {
         self.next_seq
     }
+
+    /// Seal a finished recording.
+    ///
+    /// Attaches this recorder's session metadata when the recording has
+    /// none, stamping `ended_ms` from the last recorded sample's sim
+    /// timestamp. A sample-free recording keeps `ended_ms: None` — an
+    /// honest unknown. Deterministic: derived from recorded data only,
+    /// never the wall clock.
+    pub fn finish(&self, mut recording: FlightRecording) -> FlightRecording {
+        if recording.meta.is_none() {
+            let mut sealed = self.meta.clone();
+            if let Some(meta) = sealed.as_mut()
+                && let Some(last) = recording.samples.last()
+            {
+                meta.ended_ms = Some(last.timestamp.ms);
+            }
+            recording.meta = sealed;
+        }
+        recording
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +195,20 @@ mod tests {
     use super::*;
     use fd_core::telemetry::TelemetrySnapshot;
     use fd_core::units::{AltitudeFt, SpeedKt};
+
+    fn test_meta(started_ms: u64) -> FdrSessionMeta {
+        FdrSessionMeta {
+            session_id: "session-0001".to_string(),
+            simulator: "X-Plane 12".to_string(),
+            sim_version: Some("12.1.4".to_string()),
+            aircraft: AircraftIdentity::user_provided(Some("A320".to_string())),
+            fdos_version: "0.1.0".to_string(),
+            origin: Some("EDDF".to_string()),
+            destination: Some("EDDM".to_string()),
+            started_ms,
+            ended_ms: None,
+        }
+    }
 
     #[test]
     fn unknown_fields_stay_unknown() {
@@ -152,6 +234,7 @@ mod tests {
         let sa = rec.record(&a, "TAKEOFF");
         let sb = rec.record(&b, "TAKEOFF");
         let rec_flight = FlightRecording {
+            meta: None,
             samples: vec![sa, sb],
             events: vec![],
         };
@@ -169,5 +252,110 @@ mod tests {
         let text = serde_json::to_string(&sample).unwrap();
         let back: FdrSample = serde_json::from_str(&text).unwrap();
         assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn with_meta_is_visible_via_accessor() {
+        let meta = test_meta(100);
+        let rec = Recorder::new().with_meta(meta.clone());
+        assert_eq!(rec.meta(), Some(&meta));
+
+        let plain = Recorder::new();
+        assert_eq!(plain.meta(), None);
+    }
+
+    #[test]
+    fn finish_attaches_meta_with_ended_ms_from_last_sample() {
+        let mut rec = Recorder::new().with_meta(test_meta(500));
+        let s1 = TelemetrySnapshot::empty(SimTimestamp::new(1000));
+        let s2 = TelemetrySnapshot::empty(SimTimestamp::new(1500));
+        let mut recording = FlightRecording::default();
+        recording.push_sample(rec.record(&s1, "CRUISE"));
+        recording.push_sample(rec.record(&s2, "DESCENT"));
+
+        let finished = rec.finish(recording);
+        let meta = finished
+            .meta
+            .as_ref()
+            .expect("meta must be attached by finish");
+        assert_eq!(meta.started_ms, 500);
+        assert_eq!(meta.ended_ms, Some(1500));
+        assert_eq!(finished.len(), 2);
+    }
+
+    #[test]
+    fn finish_without_samples_keeps_ended_ms_unknown() {
+        let rec = Recorder::new().with_meta(test_meta(10));
+        let finished = rec.finish(FlightRecording::default());
+        let meta = finished.meta.expect("meta present");
+        assert_eq!(meta.ended_ms, None);
+    }
+
+    #[test]
+    fn finish_without_meta_leaves_recording_meta_free() {
+        let mut rec = Recorder::new();
+        let s = TelemetrySnapshot::empty(SimTimestamp::new(42));
+        let mut recording = FlightRecording::default();
+        recording.push_sample(rec.record(&s, "TAXI"));
+        let finished = rec.finish(recording);
+        assert!(finished.meta.is_none());
+    }
+
+    #[test]
+    fn finish_never_overrides_existing_meta() {
+        let rec = Recorder::new().with_meta(test_meta(1));
+        let existing = FdrSessionMeta {
+            ended_ms: Some(9999),
+            ..test_meta(77)
+        };
+        let recording = FlightRecording {
+            meta: Some(existing.clone()),
+            ..FlightRecording::default()
+        };
+        let finished = rec.finish(recording);
+        assert_eq!(finished.meta, Some(existing));
+    }
+
+    #[test]
+    fn session_meta_serde_roundtrip() {
+        let meta = test_meta(321);
+        let text = serde_json::to_string(&meta).unwrap();
+        let back: FdrSessionMeta = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, meta);
+
+        // Optional fields may be omitted in hand-written JSON.
+        let sparse: FdrSessionMeta = serde_json::from_str(
+            r#"{
+                "session_id": "s",
+                "simulator": "XP12",
+                "aircraft": {"source": "unknown"},
+                "fdos_version": "0.1.0",
+                "started_ms": 5
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(sparse.session_id, "s");
+        assert_eq!(sparse.aircraft, AircraftIdentity::default());
+        assert_eq!(sparse.destination, None);
+        assert_eq!(sparse.ended_ms, None);
+    }
+
+    #[test]
+    fn old_recording_json_without_meta_still_loads() {
+        // Legacy fixture shape: no `meta` key at all.
+        let legacy = r#"{"samples":[],"events":[]}"#;
+        let recording: FlightRecording = serde_json::from_str(legacy).unwrap();
+        assert!(recording.meta.is_none());
+        assert!(recording.is_empty());
+
+        // Roundtrip with meta keeps equality.
+        let mut rec = Recorder::new().with_meta(test_meta(8));
+        let s = TelemetrySnapshot::empty(SimTimestamp::new(80));
+        let mut flight = FlightRecording::default();
+        flight.push_sample(rec.record(&s, "CLIMB"));
+        let finished = rec.finish(flight);
+        let text = serde_json::to_string(&finished).unwrap();
+        let back: FlightRecording = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, finished);
     }
 }
