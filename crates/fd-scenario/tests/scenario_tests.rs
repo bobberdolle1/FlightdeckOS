@@ -116,8 +116,7 @@ fn action_ignored_fault_is_detected_as_expected_failure() {
     // The adapter ACCEPTS every action but never applies the postcondition
     // (spec §41). Post-condition verification must catch the lie: the run
     // fails nominally, and `expected_failure` turns that into a PASS.
-    let spec = format!(
-        r#"
+    let spec = r#"
 [scenario]
 id = "action-ignored-negative"
 package = "../../aircraft/a32nx"
@@ -144,9 +143,8 @@ max_sim_seconds = 7200
 
 [faults]
 ignore_actions_for_ticks = 1000000
-"#
-    );
-    let path = write_scenario(&spec);
+"#;
+    let path = write_scenario(spec);
     let report = run_scenario(&path).unwrap();
     assert!(
         report.autonomy.actions_failed > 0,

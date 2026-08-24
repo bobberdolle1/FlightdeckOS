@@ -17,8 +17,8 @@ use fd_core::adapter::{AdapterError, Capability, FlightControlTargets, Simulator
 use fd_core::telemetry::{SimState, SimTimestamp, TelemetrySnapshot};
 use fd_core::units::{AltitudeAglFt, AltitudeFt, AngleDeg, SpeedKt, VerticalSpeedFpm};
 
-use crate::faults::FaultConfig;
 use crate::VirtualClock;
+use crate::faults::FaultConfig;
 use crate::kinematics::{KinematicLimits, KinematicState};
 use crate::systems::SystemsState;
 

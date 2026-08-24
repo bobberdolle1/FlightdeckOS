@@ -237,6 +237,8 @@ fn test_aircraft_sop_package_isolation() {
         addon_source_rev: "master".to_string(),
         live_verified: false,
         notes: "Test fixture".to_string(),
+        icao: String::new(),
+        author: String::new(),
     };
     let a32nx_pkg = fd_sop::package::ValidatedPackage {
         manifest,
