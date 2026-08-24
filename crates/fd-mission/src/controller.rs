@@ -37,7 +37,7 @@ pub struct MissionContext<'a> {
 }
 
 /// Commands emitted by the controller for one tick.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct MissionCommands {
     pub set_target_altitude_ft: Option<f64>,
     pub set_target_speed_kt: Option<f64>,
@@ -77,6 +77,153 @@ impl Default for MissionParameters {
     }
 }
 
+/// Development model: fixed climb-out vertical speed (fpm).
+const fn climb_out_vs_fpm() -> f64 {
+    2200.0
+}
+
+/// Development model: descend toward a low approach altitude; the actual
+/// field elevation comes from the virtual world model.
+const fn approach_elevation_estimate_ft() -> f64 {
+    2_000.0
+}
+
+/// One pure controller tick: what the mission WOULD command this tick, and
+/// the phase it WOULD advance to (`None` = remain in `phase`).
+///
+/// This is the single source of truth for both
+/// [`MissionController::step`] and Shadow Mode ([`crate::shadow`]), which
+/// replays this exact decision without mutating any mission state.
+fn intended_tick(
+    phase: &MissionPhase,
+    ctx: &MissionContext,
+    params: &MissionParameters,
+) -> (MissionCommands, Option<MissionPhase>) {
+    let mut cmds = MissionCommands::default();
+    let mut next_phase = None;
+    let snap = ctx.snapshot;
+    let ias = snap.indicated_airspeed.map(|v| v.value()).unwrap_or(0.0);
+    let agl = snap.altitude_agl.map(|v| v.value());
+    let on_ground = snap.on_ground.unwrap_or(true);
+
+    match *phase {
+        MissionPhase::Preflight => {
+            // Ground state prepared externally; command takeoff roll.
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+            cmds.set_target_speed_kt = Some(params.takeoff_target_speed_kt);
+            if !on_ground
+                || ias >= params.takeoff_target_speed_kt * 0.9 && agl.unwrap_or(0.0) > 50.0
+            {
+                next_phase = Some(MissionPhase::Takeoff);
+            }
+        }
+        MissionPhase::Takeoff => {
+            // Rotation/climb-out: accelerate to climb speed and climb.
+            cmds.set_target_speed_kt = Some(params.climb_speed_kt);
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+            cmds.set_target_vertical_speed_fpm = Some(climb_out_vs_fpm());
+            if let Some(alt) = agl
+                && alt >= 1500.0
+            {
+                next_phase = Some(MissionPhase::Climb);
+                cmds.set_target_altitude_ft = Some(params.cruise_altitude_ft);
+                cmds.set_target_vertical_speed_fpm = None; // proportional climb
+            }
+        }
+        MissionPhase::Climb => {
+            cmds.set_target_speed_kt = Some(params.climb_speed_kt);
+            cmds.set_target_altitude_ft = Some(params.cruise_altitude_ft);
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+
+            if ctx.distance_to_destination_nm <= params.descent_distance_nm {
+                next_phase = Some(MissionPhase::Descent);
+                cmds.set_target_altitude_ft = Some(approach_elevation_estimate_ft());
+                cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+            } else if let Some(alt) = snap.altitude_msl.map(|v| v.value())
+                && (alt - params.cruise_altitude_ft).abs() <= 200.0
+            {
+                next_phase = Some(MissionPhase::Cruise);
+                cmds.set_target_speed_kt = Some(params.cruise_speed_kt);
+            }
+        }
+        MissionPhase::Cruise => {
+            cmds.set_target_speed_kt = Some(params.cruise_speed_kt);
+            cmds.set_target_altitude_ft = Some(params.cruise_altitude_ft);
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+
+            if ctx.distance_to_destination_nm <= params.descent_distance_nm {
+                next_phase = Some(MissionPhase::Descent);
+                cmds.set_target_altitude_ft = Some(approach_elevation_estimate_ft());
+                cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+            }
+        }
+        MissionPhase::Descent => {
+            cmds.set_target_speed_kt = Some(params.approach_speed_kt.max(200.0));
+            cmds.set_target_vertical_speed_fpm = Some(-1800.0);
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+            if let Some(alt) = snap.altitude_msl.map(|v| v.value()) {
+                if alt > 5_000.0 {
+                    // Keep descending toward a low approach altitude.
+                    cmds.set_target_altitude_ft = Some(3_000.0);
+                } else {
+                    cmds.set_target_altitude_ft = Some(2_000.0);
+                }
+            }
+            if ctx.distance_to_destination_nm <= params.approach_gate_nm {
+                next_phase = Some(MissionPhase::Approach);
+            }
+        }
+        MissionPhase::Approach => {
+            cmds.set_target_speed_kt = Some(params.landing_speed_kt);
+            // Development value: gentle final descent so a NOMINAL
+            // mission does not trip the hard-touchdown FDM threshold.
+            cmds.set_target_vertical_speed_fpm = Some(-450.0);
+            cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
+            // Landing is the model's touchdown; when on ground we move on.
+            if on_ground {
+                next_phase = Some(MissionPhase::Landing);
+            }
+        }
+        MissionPhase::Landing => {
+            // Decelerate on the ground toward the terminal; parked when slow.
+            cmds.set_target_speed_kt = Some(5.0);
+            if ias <= 6.0 && on_ground {
+                next_phase = Some(MissionPhase::Parked);
+            }
+        }
+        MissionPhase::Parked => {
+            cmds.set_target_speed_kt = Some(0.0);
+            next_phase = Some(MissionPhase::Completed);
+        }
+        MissionPhase::Completed | MissionPhase::Failed => {}
+    }
+
+    (cmds, next_phase)
+}
+
+/// Commands the mission WOULD emit for `phase` on `ctx` this tick.
+///
+/// Pure: reads no controller state and mutates nothing. Shadow Mode
+/// compares these intended commands against the observed autopilot
+/// selections to detect divergence between autonomy and reality.
+pub fn intended_commands(
+    phase: &MissionPhase,
+    ctx: &MissionContext,
+    params: &MissionParameters,
+) -> MissionCommands {
+    intended_tick(phase, ctx, params).0
+}
+
+/// The phase the mission WOULD advance to this tick (`None` = remain in
+/// `phase`). Pure companion to [`intended_commands`].
+pub fn intended_next_phase(
+    phase: &MissionPhase,
+    ctx: &MissionContext,
+    params: &MissionParameters,
+) -> Option<MissionPhase> {
+    intended_tick(phase, ctx, params).1
+}
+
 /// The deterministic mission controller.
 #[derive(Debug)]
 pub struct MissionController {
@@ -97,110 +244,18 @@ impl MissionController {
     }
 
     /// One controller pass. Emits guidance targets and may transition the
-    /// mission phase. Pure w.r.t. its inputs apart from internal phase.
+    /// mission phase. Delegates the decision to the pure [`intended_tick`]
+    /// core, so [`crate::shadow`] can replay the identical decision
+    /// read-only; external behavior is unchanged.
     pub fn step(
         &mut self,
         ctx: &MissionContext,
         controls: &mut dyn FlightControlTargets,
         _route: &mut RouteFollower,
     ) -> MissionCommands {
-        let mut cmds = MissionCommands::default();
-        let snap = ctx.snapshot;
-        let ias = snap.indicated_airspeed.map(|v| v.value()).unwrap_or(0.0);
-        let agl = snap.altitude_agl.map(|v| v.value());
-        let on_ground = snap.on_ground.unwrap_or(true);
-
-        match self.phase {
-            MissionPhase::Preflight => {
-                // Ground state prepared externally; command takeoff roll.
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-                cmds.set_target_speed_kt = Some(self.params.takeoff_target_speed_kt);
-                if !on_ground
-                    || ias >= self.params.takeoff_target_speed_kt * 0.9 && agl.unwrap_or(0.0) > 50.0
-                {
-                    self.phase = MissionPhase::Takeoff;
-                }
-            }
-            MissionPhase::Takeoff => {
-                // Rotation/climb-out: accelerate to climb speed and climb.
-                cmds.set_target_speed_kt = Some(self.params.climb_speed_kt);
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-                cmds.set_target_vertical_speed_fpm =
-                    Some(self.params_climb_vs_for(agl.unwrap_or(0.0)));
-                if let Some(alt) = agl
-                    && alt >= 1500.0
-                {
-                    self.phase = MissionPhase::Climb;
-                    cmds.set_target_altitude_ft = Some(self.params.cruise_altitude_ft);
-                    cmds.set_target_vertical_speed_fpm = None; // proportional climb
-                }
-            }
-            MissionPhase::Climb => {
-                cmds.set_target_speed_kt = Some(self.params.climb_speed_kt);
-                cmds.set_target_altitude_ft = Some(self.params.cruise_altitude_ft);
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-
-                if ctx.distance_to_destination_nm <= self.params.descent_distance_nm {
-                    self.phase = MissionPhase::Descent;
-                    cmds.set_target_altitude_ft = Some(self.approach_elevation_estimate());
-                    cmds.set_target_vertical_speed_fpm = Some(-1800.0);
-                } else if let Some(alt) = snap.altitude_msl.map(|v| v.value())
-                    && (alt - self.params.cruise_altitude_ft).abs() <= 200.0
-                {
-                    self.phase = MissionPhase::Cruise;
-                    cmds.set_target_speed_kt = Some(self.params.cruise_speed_kt);
-                }
-            }
-            MissionPhase::Cruise => {
-                cmds.set_target_speed_kt = Some(self.params.cruise_speed_kt);
-                cmds.set_target_altitude_ft = Some(self.params.cruise_altitude_ft);
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-
-                if ctx.distance_to_destination_nm <= self.params.descent_distance_nm {
-                    self.phase = MissionPhase::Descent;
-                    cmds.set_target_altitude_ft = Some(self.approach_elevation_estimate());
-                    cmds.set_target_vertical_speed_fpm = Some(-1800.0);
-                }
-            }
-            MissionPhase::Descent => {
-                cmds.set_target_speed_kt = Some(self.params.approach_speed_kt.max(200.0));
-                cmds.set_target_vertical_speed_fpm = Some(-1800.0);
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-                if let Some(alt) = snap.altitude_msl.map(|v| v.value()) {
-                    if alt > 5_000.0 {
-                        // Keep descending toward a low approach altitude.
-                        cmds.set_target_altitude_ft = Some(3_000.0);
-                    } else {
-                        cmds.set_target_altitude_ft = Some(2_000.0);
-                    }
-                }
-                if ctx.distance_to_destination_nm <= self.params.approach_gate_nm {
-                    self.phase = MissionPhase::Approach;
-                }
-            }
-            MissionPhase::Approach => {
-                cmds.set_target_speed_kt = Some(self.params.landing_speed_kt);
-                // Development value: gentle final descent so a NOMINAL
-                // mission does not trip the hard-touchdown FDM threshold.
-                cmds.set_target_vertical_speed_fpm = Some(-450.0);
-                cmds.set_target_heading_deg = Some(ctx.bearing_to_waypoint_deg);
-                // Landing is the model's touchdown; when on ground we move on.
-                if on_ground {
-                    self.phase = MissionPhase::Landing;
-                }
-            }
-            MissionPhase::Landing => {
-                // Decelerate on the ground toward the terminal; parked when slow.
-                cmds.set_target_speed_kt = Some(5.0);
-                if ias <= 6.0 && on_ground {
-                    self.phase = MissionPhase::Parked;
-                }
-            }
-            MissionPhase::Parked => {
-                cmds.set_target_speed_kt = Some(0.0);
-                self.phase = MissionPhase::Completed;
-            }
-            MissionPhase::Completed | MissionPhase::Failed => {}
+        let (cmds, next_phase) = intended_tick(&self.phase, ctx, &self.params);
+        if let Some(next) = next_phase {
+            self.phase = next;
         }
 
         // Apply emitted commands to the control-target boundary.
@@ -217,17 +272,6 @@ impl MissionController {
             controls.set_target_vertical_speed(v);
         }
         cmds
-    }
-
-    fn params_climb_vs_for(&self, _agl_ft: f64) -> f64 {
-        // Development value: fixed climb-out VS.
-        2200.0
-    }
-
-    fn approach_elevation_estimate(&self) -> f64 {
-        // Development model: descend toward a low approach altitude; the
-        // actual field elevation comes from the virtual world model.
-        2_000.0
     }
 
     /// Force-fail the mission (used by assertion/reporting layers).
@@ -377,5 +421,47 @@ mod tests {
         let mut c = MissionController::new(MissionParameters::default());
         c.fail();
         assert_eq!(c.phase(), MissionPhase::Failed);
+    }
+
+    /// The extracted pure decision core must be (1) side-effect free and
+    /// (2) identical to what `step` emits, tick after tick — this is the
+    /// contract Shadow Mode relies on.
+    #[test]
+    fn intended_commands_is_pure_and_matches_step_output() {
+        let mut driven = MissionController::new(MissionParameters::default());
+        let mut replay = MissionController::new(driven.params.clone());
+
+        let snaps = [
+            snap(622.0 + 1600.0, 1600.0, 300.0, false), // Preflight -> Takeoff
+            snap(622.0 + 1700.0, 1700.0, 300.0, false), // Takeoff -> Climb
+            snap(622.0 + 1800.0, 1800.0, 300.0, false), // steady climb
+        ];
+        for s in &snaps {
+            let ctx = MissionContext {
+                snapshot: s,
+                distance_to_destination_nm: 400.0,
+                bearing_to_waypoint_deg: 45.0,
+            };
+            let phase_before = driven.phase();
+
+            // Purity: repeated replay is stable and advances nothing.
+            let intended = intended_commands(&phase_before, &ctx, &replay.params);
+            let again = intended_commands(&phase_before, &ctx, &replay.params);
+            assert_eq!(intended, again);
+            assert_eq!(replay.phase, phase_before);
+
+            // Parity: the mutating step emits exactly the pure intent.
+            let mut controls = RecordingControls::default();
+            let stepped = driven.step(&ctx, &mut controls, &mut route());
+            assert_eq!(stepped, intended);
+
+            // And the read-only twin progresses identically when its own
+            // derived transition is applied explicitly.
+            if let Some(next) = intended_next_phase(&phase_before, &ctx, &replay.params) {
+                replay.phase = next;
+            }
+            assert_eq!(driven.phase(), replay.phase);
+        }
+        assert_eq!(driven.phase(), MissionPhase::Climb);
     }
 }
