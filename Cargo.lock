@@ -352,6 +352,10 @@ version = "0.1.0"
 dependencies = [
  "fd-core",
  "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

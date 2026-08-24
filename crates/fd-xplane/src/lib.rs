@@ -18,6 +18,7 @@ pub mod adapter;
 pub mod client;
 pub mod protocol;
 pub mod refs;
+pub mod webapi;
 
 pub use adapter::{XPlaneAdapter, XPlaneConfig};
 pub use client::XPlaneUdpClient;
