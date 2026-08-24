@@ -41,7 +41,7 @@ pub const MASKABLE_FIELDS: [&str; 10] = [
 
 /// Deterministic fault injection configuration. `Default` = no faults
 /// (the nominal simulator path is bit-for-bit unchanged).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FaultConfig {
     /// Adapter accepts actions but never applies their postcondition for
@@ -55,17 +55,6 @@ pub struct FaultConfig {
     pub unknown_sensor_fields: Vec<String>,
     /// Adapter reports disconnected (poll/execute fail) while `tick < N`.
     pub disconnect_until_tick: u64,
-}
-
-impl Default for FaultConfig {
-    fn default() -> Self {
-        Self {
-            ignore_actions_for_ticks: 0,
-            telemetry_freeze_until_tick: 0,
-            unknown_sensor_fields: Vec::new(),
-            disconnect_until_tick: 0,
-        }
-    }
 }
 
 impl FaultConfig {
