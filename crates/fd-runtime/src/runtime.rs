@@ -237,9 +237,13 @@ impl<W: TraceSink> Runtime<W> {
         }
 
         // 5. Trace succeeded: commit staged SOP requests and drain terminal
-        // outcomes for the next tick's flow pass.
+        // outcomes for the next tick's flow pass. Without a flow engine the
+        // outcomes stay in the executor for `take_completed_actions`
+        // (diagnostics) — a flow-less runtime has no other consumer.
         self.executor.commit();
-        self.flow_outcomes = self.executor.take_completed();
+        if self.flows.is_some() {
+            self.flow_outcomes = self.executor.take_completed();
+        }
 
         Ok(stats)
     }
@@ -391,6 +395,51 @@ mod tests {
             fd_core::telemetry::SimState::Running
         };
         s
+    }
+
+    #[test]
+    fn flowless_runtime_surfaces_terminal_actions_to_diagnostics() {
+        // Regression: tick() unconditionally drained terminal action
+        // outcomes into the SOP flow buffer, so a flow-less consumer (the
+        // live beacon smoke) never saw Verified. The drain now belongs to
+        // flow-equipped runtimes only.
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = ReplayAdapter::new(vec![
+            ReplayStep::Snapshot(beacon_snap(0, false, false)),
+            ReplayStep::Snapshot(beacon_snap(1000, true, false)),
+            ReplayStep::Snapshot(beacon_snap(2000, true, false)),
+        ]);
+        let trace = TraceWriter::create(trace_path(&dir, "t.jsonl")).unwrap();
+        let mut rt = Runtime::new(
+            Box::new(adapter),
+            trace,
+            SessionId(0),
+            test_catalog(),
+            DeadlineTicks::default(),
+        );
+        rt.start().unwrap();
+        rt.tick(EventSource::Replay).unwrap();
+        rt.submit_action(
+            CockpitAction::SetBeacon(SwitchPosition::On),
+            Actor::User,
+            SimTimestamp::new(500),
+        )
+        .unwrap();
+        rt.tick(EventSource::Replay).unwrap();
+        let drained = rt.take_completed_actions();
+        assert!(
+            drained.is_empty(),
+            "no terminal status before the fresh post-dispatch observation: {drained:?}"
+        );
+        rt.tick(EventSource::Replay).unwrap();
+        let drained = rt.take_completed_actions();
+        assert_eq!(
+            drained.len(),
+            1,
+            "terminal action must surface: {drained:?}"
+        );
+        assert_eq!(drained[0].1, ActionStatus::Verified);
+        rt.finish().unwrap();
     }
 
     #[test]
