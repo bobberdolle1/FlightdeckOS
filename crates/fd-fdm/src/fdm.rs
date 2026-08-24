@@ -30,30 +30,39 @@
 //! ([`FdmEventKind::HardTouchdown`]) stay single events marked `started`.
 
 use crate::fdr::FdrSample;
+use fd_core::units::{AltitudeAglFt, AngleDeg, VerticalSpeedFpm};
 use serde::{Deserialize, Serialize};
 
 /// Development threshold set (`ApproachProfile::DevelopmentDefault`).
+///
+/// Typed with [`fd_core::units`] newtypes so fpm/ft/deg values cannot be
+/// cross-assigned. Serde is transparent over `f64`, so serialized shapes
+/// are unchanged (plain numbers). DEVELOPMENT DEFAULTS — not airline
+/// policy; every value is named and overridable per aircraft package.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevelopmentThresholds {
     /// Excessive sink rate below this AGL (ft), |VS| above this (fpm).
-    pub excessive_sink_rate_fpm: f64,
-    pub excessive_sink_max_agl_ft: f64,
-    /// Excessive bank below this AGL (ft), bank above this (deg).
-    pub excessive_bank_deg: f64,
-    pub excessive_bank_max_agl_ft: f64,
+    ///
+    /// Sign convention: VS is signed (negative = descent); thresholds and
+    /// comparisons use the sink magnitude `-vs`.
+    pub excessive_sink_rate_fpm: VerticalSpeedFpm,
+    pub excessive_sink_max_agl_ft: AltitudeAglFt,
+    /// Excessive bank below this AGL (ft), |bank| above this (deg).
+    pub excessive_bank_deg: AngleDeg,
+    pub excessive_bank_max_agl_ft: AltitudeAglFt,
     /// Hard touchdown: vertical speed at touchdown beyond this (|fpm|).
-    pub hard_touchdown_vs_fpm: f64,
+    pub hard_touchdown_vs_fpm: VerticalSpeedFpm,
 }
 
 impl Default for DevelopmentThresholds {
     fn default() -> Self {
         // DEVELOPMENT DEFAULTS — not airline policy.
         Self {
-            excessive_sink_rate_fpm: 1200.0,
-            excessive_sink_max_agl_ft: 2500.0,
-            excessive_bank_deg: 30.0,
-            excessive_bank_max_agl_ft: 1500.0,
-            hard_touchdown_vs_fpm: 600.0,
+            excessive_sink_rate_fpm: VerticalSpeedFpm::new(1200.0),
+            excessive_sink_max_agl_ft: AltitudeAglFt::new(2500.0),
+            excessive_bank_deg: AngleDeg::new(30.0),
+            excessive_bank_max_agl_ft: AltitudeAglFt::new(1500.0),
+            hard_touchdown_vs_fpm: VerticalSpeedFpm::new(600.0),
         }
     }
 }
@@ -162,10 +171,11 @@ impl FdmAnalyzer {
         } else {
             match (s.radio_altitude, s.vertical_speed) {
                 (Some(agl), Some(vs))
-                    if agl <= self.thresholds.excessive_sink_max_agl_ft && vs.is_finite() =>
+                    if agl <= self.thresholds.excessive_sink_max_agl_ft.value()
+                        && vs.is_finite() =>
                 {
                     let sink = -vs;
-                    (sink >= self.thresholds.excessive_sink_rate_fpm).then_some(sink)
+                    (sink >= self.thresholds.excessive_sink_rate_fpm.value()).then_some(sink)
                 }
                 _ => None,
             }
@@ -174,7 +184,7 @@ impl FdmAnalyzer {
             &mut self.sink_exceedance,
             sink_severity,
             FdmEventKind::ExcessiveSinkRate,
-            self.thresholds.excessive_sink_rate_fpm,
+            self.thresholds.excessive_sink_rate_fpm.value(),
             s,
             &mut new_events,
         );
@@ -184,9 +194,9 @@ impl FdmAnalyzer {
         let bank_severity = if !airborne {
             None
         } else if let (Some(agl), Some(bank)) = (s.radio_altitude, s.bank)
-            && agl <= self.thresholds.excessive_bank_max_agl_ft
+            && agl <= self.thresholds.excessive_bank_max_agl_ft.value()
             && bank.is_finite()
-            && bank.abs() >= self.thresholds.excessive_bank_deg
+            && bank.abs() >= self.thresholds.excessive_bank_deg.value()
         {
             Some(bank.abs())
         } else {
@@ -196,7 +206,7 @@ impl FdmAnalyzer {
             &mut self.bank_exceedance,
             bank_severity,
             FdmEventKind::ExcessiveBankLowAltitude,
-            self.thresholds.excessive_bank_deg,
+            self.thresholds.excessive_bank_deg.value(),
             s,
             &mut new_events,
         );
@@ -210,13 +220,13 @@ impl FdmAnalyzer {
             && vs.is_finite()
         {
             let impact = -vs;
-            if impact >= self.thresholds.hard_touchdown_vs_fpm {
+            if impact >= self.thresholds.hard_touchdown_vs_fpm.value() {
                 new_events.push(FdmEvent {
                     sample_seq: s.seq,
                     timestamp_ms: s.timestamp.ms,
                     kind: FdmEventKind::HardTouchdown,
                     measured: impact,
-                    threshold: self.thresholds.hard_touchdown_vs_fpm,
+                    threshold: self.thresholds.hard_touchdown_vs_fpm.value(),
                     lifecycle: FdmLifecycle::Started,
                     peak: None,
                     samples_active: 1,
@@ -291,11 +301,11 @@ mod tests {
 
     fn analyzer() -> FdmAnalyzer {
         FdmAnalyzer::new(DevelopmentThresholds {
-            excessive_sink_rate_fpm: 1000.0,
-            excessive_sink_max_agl_ft: 2000.0,
-            excessive_bank_deg: 30.0,
-            excessive_bank_max_agl_ft: 1000.0,
-            hard_touchdown_vs_fpm: 500.0,
+            excessive_sink_rate_fpm: VerticalSpeedFpm::new(1000.0),
+            excessive_sink_max_agl_ft: AltitudeAglFt::new(2000.0),
+            excessive_bank_deg: AngleDeg::new(30.0),
+            excessive_bank_max_agl_ft: AltitudeAglFt::new(1000.0),
+            hard_touchdown_vs_fpm: VerticalSpeedFpm::new(500.0),
         })
     }
 

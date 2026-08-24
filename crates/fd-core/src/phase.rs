@@ -108,6 +108,26 @@ pub struct PhaseAssessment {
     pub timestamp: SimTimestamp,
 }
 
+/// Legacy fallback used when no route/runway distance is known: with this
+/// value no arrival/approach threshold can match (behavioral fidelity with
+/// the original open-airac engine).
+pub const NO_DISTANCES_FALLBACK_NM: f64 = 999.0;
+
+// DEVELOPMENT DEFAULTS for distance-driven phase transitions. These gate
+// ONLY callers that actually supply distances (`PhaseTelemetry::
+//~ with_distances`); callers leaving them `None` keep the exact legacy
+//~ fallback behavior above.
+/// Destination/runway distance entering the approach phase (NM).
+pub const APPROACH_ENTRY_DEST_NM: f64 = 20.0;
+/// Destination/runway distance entering the final approach segment (NM).
+pub const FINAL_APPROACH_DEST_NM: f64 = 5.0;
+/// Destination distance entering terminal arrival (NM).
+pub const ARRIVAL_DEST_NM: f64 = 60.0;
+/// Distance from departure within which climb counts as terminal departure (NM).
+pub const DEPARTURE_FROM_DEP_NM: f64 = 30.0;
+/// Destination distance inside which descent counts as enroute descent phase (NM).
+pub const ENROUTE_DESCENT_DEST_NM: f64 = 150.0;
+
 /// Input aircraft telemetry for flight phase assessment (raw values).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseTelemetry {
@@ -117,9 +137,24 @@ pub struct PhaseTelemetry {
     pub groundspeed_kt: f64,
     pub vertical_speed_fpm: f64,
     pub distance_to_dest_nm: Option<f64>,
+    /// Distance to the landing runway/threshold (NM), when known. Consumed
+    /// for approach/final gating when destination distance is absent.
+    #[serde(default)]
+    pub distance_to_runway_nm: Option<f64>,
     pub distance_from_dep_nm: Option<f64>,
     pub active_procedure_kind: Option<char>, // 'D'=SID, 'E'=STAR, 'F'=Approach
     pub timestamp: SimTimestamp,
+}
+
+impl PhaseTelemetry {
+    /// Attach known distances (NM) so the arrival/approach chain becomes
+    /// reachable. Callers without route data leave both `None` and keep the
+    /// exact legacy fallback behavior ([`NO_DISTANCES_FALLBACK_NM`]).
+    pub fn with_distances(mut self, dest_nm: Option<f64>, runway_nm: Option<f64>) -> Self {
+        self.distance_to_dest_nm = dest_nm;
+        self.distance_to_runway_nm = runway_nm;
+        self
+    }
 }
 
 impl From<&TelemetrySnapshot> for PhaseTelemetry {
@@ -130,9 +165,11 @@ impl From<&TelemetrySnapshot> for PhaseTelemetry {
             altitude_agl_ft: s.altitude_agl.map(|v| v.value()),
             groundspeed_kt: s.groundspeed.map(|v| v.value()).unwrap_or(0.0),
             vertical_speed_fpm: s.vertical_speed.map(|v| v.value()).unwrap_or(0.0),
-            // No flight plan in Task 1: distances are absent; the engine falls
-            // back to its documented defaults (999 NM / no procedure).
+            // No route context wired yet (Integration supplies distances
+            // via `with_distances`): the engine falls back to its documented
+            // defaults (999 NM / no procedure) — unchanged legacy behavior.
             distance_to_dest_nm: None,
+            distance_to_runway_nm: None,
             distance_from_dep_nm: None,
             active_procedure_kind: None,
             timestamp: s.timestamp,
@@ -267,8 +304,11 @@ impl FlightPhaseEngine {
                 )
             }
         } else {
+            let dist_dest = telem
+                .distance_to_dest_nm
+                .or(telem.distance_to_runway_nm)
+                .unwrap_or(NO_DISTANCES_FALLBACK_NM);
             let agl = telem.altitude_agl_ft.unwrap_or(telem.altitude_msl_ft);
-            let dist_dest = telem.distance_to_dest_nm.unwrap_or(999.0);
             let proc = telem.active_procedure_kind.unwrap_or(' ');
 
             if agl < 1500.0
@@ -285,7 +325,10 @@ impl FlightPhaseEngine {
                     ),
                 )
             } else if proc == 'D'
-                || (telem.distance_from_dep_nm.unwrap_or(999.0) < 30.0
+                || (telem
+                    .distance_from_dep_nm
+                    .unwrap_or(NO_DISTANCES_FALLBACK_NM)
+                    < DEPARTURE_FROM_DEP_NM
                     && telem.vertical_speed_fpm > 200.0)
             {
                 (
@@ -293,9 +336,11 @@ impl FlightPhaseEngine {
                     "Flying SID / Terminal Departure phase".to_string(),
                 )
             } else if proc == 'F'
-                || (dist_dest < 15.0 && agl < 4000.0 && telem.vertical_speed_fpm < -100.0)
+                || (dist_dest < APPROACH_ENTRY_DEST_NM
+                    && agl < 4000.0
+                    && telem.vertical_speed_fpm < -100.0)
             {
-                if dist_dest < 5.0 && agl < 1500.0 {
+                if dist_dest < FINAL_APPROACH_DEST_NM && agl < 1500.0 {
                     (
                         FlightPhase::Final,
                         format!(
@@ -312,7 +357,9 @@ impl FlightPhaseEngine {
                         ),
                     )
                 }
-            } else if proc == 'E' || (dist_dest < 60.0 && telem.vertical_speed_fpm < -200.0) {
+            } else if proc == 'E'
+                || (dist_dest < ARRIVAL_DEST_NM && telem.vertical_speed_fpm < -200.0)
+            {
                 (
                     FlightPhase::Arrival,
                     format!(
@@ -320,7 +367,7 @@ impl FlightPhaseEngine {
                         dist_dest
                     ),
                 )
-            } else if telem.vertical_speed_fpm < -300.0 && dist_dest < 150.0 {
+            } else if telem.vertical_speed_fpm < -300.0 && dist_dest < ENROUTE_DESCENT_DEST_NM {
                 (
                     FlightPhase::Descent,
                     format!(
@@ -368,6 +415,7 @@ mod tests {
             groundspeed_kt: gs,
             vertical_speed_fpm: vs,
             distance_to_dest_nm: None,
+            distance_to_runway_nm: None,
             distance_from_dep_nm: None,
             active_procedure_kind: None,
             timestamp: SimTimestamp::new(ts),
@@ -428,5 +476,75 @@ mod tests {
         assert!(p.on_ground); // default: treat unknown as on-ground (conservative)
         assert_eq!(p.altitude_msl_ft, 0.0);
         assert_eq!(p.timestamp.ms, 42);
+    }
+
+    #[test]
+    fn with_distances_arrival_and_approach_become_reachable() {
+        let mut e = FlightPhaseEngine::new();
+        // Establish Cruise airborne.
+        e.evaluate(&telem(0, false, 250.0, 0.0, 10_000.0, Some(9_500.0)));
+        // Descending, 40 NM out: ARRIVAL threshold (dev 60 NM) reached.
+        let t = |ts: u64, dist: f64| {
+            telem(ts, false, 230.0, -800.0, 5_000.0, Some(4_600.0)).with_distances(Some(dist), None)
+        };
+        e.evaluate(&t(1_000, 40.0));
+        let a = e.evaluate(&t(2_000, 38.0));
+        assert_eq!(a.phase, FlightPhase::Arrival, "evidence: {}", a.evidence);
+
+        // 15 NM out, low and descending: approach entry (dev 20 NM).
+        let t2 = |ts: u64, dist: f64| {
+            telem(ts, false, 190.0, -600.0, 2_800.0, Some(2_400.0)).with_distances(Some(dist), None)
+        };
+        e.evaluate(&t2(3_000, 15.0));
+        let a = e.evaluate(&t2(4_000, 14.0));
+        assert_eq!(a.phase, FlightPhase::Approach, "evidence: {}", a.evidence);
+
+        // 3 NM out, very low: final segment (dev 5 NM).
+        let t3 = |ts: u64, dist: f64| {
+            telem(ts, false, 140.0, -700.0, 900.0, Some(600.0)).with_distances(Some(dist), None)
+        };
+        e.evaluate(&t3(5_000, 3.0));
+        let a = e.evaluate(&t3(6_000, 3.0));
+        assert_eq!(a.phase, FlightPhase::Final, "evidence: {}", a.evidence);
+    }
+
+    #[test]
+    fn runway_distance_alone_drives_approach_chain() {
+        let mut e = FlightPhaseEngine::new();
+        e.evaluate(&telem(0, false, 250.0, 0.0, 8_000.0, Some(7_600.0)));
+        // Only runway distance known; destination distance absent.
+        let t = |ts: u64, dist: f64| {
+            telem(ts, false, 200.0, -900.0, 3_000.0, Some(2_600.0)).with_distances(None, Some(dist))
+        };
+        e.evaluate(&t(1_000, 12.0));
+        let a = e.evaluate(&t(2_000, 11.0));
+        assert_eq!(a.phase, FlightPhase::Approach, "evidence: {}", a.evidence);
+    }
+
+    #[test]
+    fn without_distances_terminal_arrival_stays_unreachable() {
+        let mut e = FlightPhaseEngine::new();
+        e.evaluate(&telem(0, false, 250.0, 0.0, 8_000.0, Some(7_600.0)));
+        // Identical trajectory to the reachable test but distances None:
+        // legacy 999 NM fallback keeps arrival/approach/final unreachable.
+        let t = |ts: u64| telem(ts, false, 180.0, -900.0, 2_000.0, Some(1_600.0));
+        for ts in [1_000u64, 2_000, 3_000, 4_000, 5_000, 6_000] {
+            let a = e.evaluate(&t(ts));
+            assert!(
+                !a.phase.is_terminal_arrival(),
+                "no distance data must never yield {:?}",
+                a.phase
+            );
+        }
+    }
+
+    #[test]
+    fn builder_sets_distance_fields() {
+        let base = telem(0, false, 200.0, -500.0, 3_000.0, Some(2_600.0));
+        assert_eq!(base.distance_to_dest_nm, None);
+        assert_eq!(base.distance_to_runway_nm, None);
+        let with = base.with_distances(Some(42.0), Some(7.5));
+        assert_eq!(with.distance_to_dest_nm, Some(42.0));
+        assert_eq!(with.distance_to_runway_nm, Some(7.5));
     }
 }
