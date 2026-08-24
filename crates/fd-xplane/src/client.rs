@@ -192,8 +192,13 @@ impl XPlaneUdpClient {
                     match socket.recv_from(&mut buf) {
                         Ok((n, from)) => {
                             // Source authenticity: only the configured
-                            // simulator endpoint may feed telemetry.
-                            if from != remote {
+                            // simulator HOST may feed telemetry. The source
+                            // PORT is deliberately not checked: X-Plane 12
+                            // streams RREF replies from a secondary socket
+                            // (observed live: command port 49000, data
+                            // source port 49001). Host identity is the
+                            // security boundary the protocol can express.
+                            if from.ip() != remote.ip() {
                                 shared.rejected_foreign.fetch_add(1, Ordering::Relaxed);
                                 continue;
                             }
