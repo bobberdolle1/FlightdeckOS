@@ -171,6 +171,95 @@ pub fn data_quality_summary(
         never_fresh_channels: never_fresh,
     }
 }
+
+// -- Debrief assembly (Task 6 §54) -------------------------------------------
+
+/// Inputs to the structured debrief builder.
+pub struct BuildDebriefArgs<'a> {
+    pub identity: AircraftIdentity,
+    pub session: &'a fd_fdm::session::SessionTracker,
+    pub sample_count: u64,
+    pub origin: Option<&'a str>,
+    pub destination: Option<&'a str>,
+    pub route_source_str: Option<String>,
+    pub waypoint_count: usize,
+    pub route_usable: bool,
+    pub off_route_events: u64,
+    pub route_complete: bool,
+    pub samples: &'a [fd_fdm::fdr::FdrSample],
+    pub fdm_events: u64,
+    pub approach: &'a fd_fdm::qoa::ApproachReport,
+    /// Runway context when OpenAIRAC geometry resolved one; landing
+    /// runway-relative metrics stay None without it (never fabricated).
+    pub runway: Option<&'a fd_mission::runway::RunwayContext>,
+    pub shadow_summary: Option<fd_mission::shadow::ShadowSummary>,
+}
+
+/// Bridge: fd-fdm's RunwayGeometry consumed from an fd-mission RunwayContext
+/// without coupling the two crates (dependency direction preserved).
+struct RunwayBridge<'a>(&'a fd_mission::runway::RunwayContext);
+
+impl fd_fdm::qol::RunwayGeometry for RunwayBridge<'_> {
+    fn centerline_offset_m(&self, lat: f64, lon: f64) -> Option<f64> {
+        self.0.centerline_offset_m(lat, lon)
+    }
+    fn distance_to_threshold_m(&self, lat: f64, lon: f64) -> Option<f64> {
+        self.0.distance_to_threshold_m(lat, lon)
+    }
+    fn remaining_runway_m(&self, lat: f64, lon: f64) -> Option<f64> {
+        self.0.remaining_runway_m(lat, lon)
+    }
+}
+
+/// Assemble the structured flight debrief from analyzer outputs
+/// (Task 6 §54). Deterministic: same inputs -> same document.
+pub fn build_debrief(a: BuildDebriefArgs<'_>) -> Result<FlightDebrief, serde_json::Error> {
+    let recording = fd_fdm::fdr::FlightRecording {
+        meta: None,
+        samples: a.samples.to_vec(),
+        events: vec![],
+    };
+    let landing = match a.runway {
+        Some(rw) => fd_fdm::qol::analyze_with_runway(&recording, &RunwayBridge(rw)),
+        None => fd_fdm::qol::analyze(a.samples),
+    };
+    let mut debrief = FlightDebrief::new(a.identity);
+    debrief.session = serde_json::json!({
+        "state": format!("{:?}", a.session.state()),
+        "samples": a.sample_count,
+        "ever_airborne": a.session.ever_airborne(),
+        "adapter_source": "xplane-udp",
+        "origin": a.origin,
+        "destination": a.destination,
+    });
+    debrief.route = RouteSummary {
+        source: a.route_source_str,
+        waypoint_count: a.route_usable.then_some(a.waypoint_count),
+        off_route_events: a.off_route_events,
+        completed: a.route_usable.then_some(a.route_complete),
+    };
+    debrief.phase_timeline = phase_timeline_from_samples(
+        &a.samples
+            .iter()
+            .map(|s| (s.timestamp.ms, s.flight_phase.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    debrief.fdm_summary = serde_json::json!({
+        "events": a.fdm_events,
+    });
+    debrief.approach = serde_json::to_value(a.approach)?;
+    debrief.landing = serde_json::to_value(&landing)?;
+    debrief.shadow = serde_json::json!(match a.shadow_summary {
+        Some(summary) => serde_json::to_value(summary)?,
+        None => serde_json::Value::Null,
+    });
+    debrief.data_quality = data_quality_summary(
+        a.samples.len() as u64,
+        a.samples.iter().map(|s| s.channel_quality.clone()),
+    );
+    Ok(debrief)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

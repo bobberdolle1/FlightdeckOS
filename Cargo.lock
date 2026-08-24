@@ -297,6 +297,7 @@ dependencies = [
  "fd-mission",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

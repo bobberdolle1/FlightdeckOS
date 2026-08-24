@@ -13,7 +13,6 @@ use fd_core::telemetry::TelemetrySnapshot;
 use fd_fdm::fdm::FdmAnalyzer;
 use fd_fdm::fdr::{FdrEvent, StreamedRecorder};
 use fd_fdm::qoa::ApproachAnalyzer;
-use fd_fdm::qol;
 use fd_fdm::session::{SessionEvidence, SessionTracker};
 use fd_mission::controller::{MissionContext, MissionController, MissionParameters};
 use fd_mission::intents::intent_from_tick;
@@ -57,22 +56,6 @@ impl FlightControlTargets for NullControls {
     fn set_target_heading(&mut self, _heading_deg: f64) {}
     fn set_target_vertical_speed(&mut self, _vs_fpm: f64) {}
     fn set_target_speed(&mut self, _speed_kt: f64) {}
-}
-
-/// Bridge: fd-fdm's RunwayGeometry consumed from an fd-mission RunwayContext
-/// without coupling the two crates (dependency direction preserved).
-struct RunwayBridge<'a>(&'a RunwayContext);
-
-impl fd_fdm::qol::RunwayGeometry for RunwayBridge<'_> {
-    fn centerline_offset_m(&self, lat: f64, lon: f64) -> Option<f64> {
-        self.0.centerline_offset_m(lat, lon)
-    }
-    fn distance_to_threshold_m(&self, lat: f64, lon: f64) -> Option<f64> {
-        self.0.distance_to_threshold_m(lat, lon)
-    }
-    fn remaining_runway_m(&self, lat: f64, lon: f64) -> Option<f64> {
-        self.0.remaining_runway_m(lat, lon)
-    }
 }
 
 /// OpenAIRAC-derived navigation context for the session.
@@ -264,6 +247,9 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
             }),
             MissionShadow::new(),
             NullControls,
+            // Hoisted: the controller signature requires a follower, but
+            // the observe path never consumes its guidance.
+            fd_mission::RouteFollower::new(route_state.waypoints.clone(), 2.5),
         )
     });
 
@@ -333,7 +319,7 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
         }
 
         // Mission Shadow: intended vs observed, zero writes.
-        if let (Some((controller, shadow_rec, null)), Some(pos), true) =
+        if let (Some((controller, shadow_rec, null, follower)), Some(pos), true) =
             (shadow.as_mut(), &s.position, route_usable)
         {
             let obs = route_monitor.update(pos.lat.value(), pos.lon.value());
@@ -358,7 +344,6 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
             };
             let phase = controller_phase(controller);
             let params = controller_params(controller).clone();
-            let follower = &mut dummy_follower(&route_state);
             let cmds = controller.step(&ctx, null, follower);
             // Intent derived from the SAME tick output (single decision
             // source); carried by the shadow entries with reasons.
@@ -405,50 +390,23 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
 
     // Debrief.
     if let Some(debrief_path) = &opts.debrief_out {
-        let approach = qoa.finish();
-        let recording = fd_fdm::fdr::FlightRecording {
-            meta: None,
-            samples: samples.clone(),
-            events: vec![],
-        };
-        let landing = match nav.as_ref().and_then(|n| n.runway.as_ref()) {
-            Some(rw) => qol::analyze_with_runway(&recording, &RunwayBridge(rw)),
-            None => qol::analyze(&samples),
-        };
-        let mut debrief = fd_debrief::FlightDebrief::new(adapter.identity().clone());
-        debrief.session = serde_json::json!({
-            "state": format!("{:?}", session.state()),
-            "samples": writer.samples_written(),
-            "ever_airborne": session.ever_airborne(),
-            "adapter_source": "xplane-udp",
-            "origin": opts.origin_icao,
-            "destination": opts.destination_icao,
-        });
-        debrief.route = fd_debrief::RouteSummary {
-            source: route_usable.then(|| format!("{:?}", route_state.source)), // format! is lazy: keep then
-            waypoint_count: route_usable.then_some(route_state.waypoints.len()),
+        let debrief = fd_debrief::build_debrief(fd_debrief::BuildDebriefArgs {
+            identity: adapter.identity().clone(),
+            session: &session,
+            sample_count: writer.samples_written(),
+            origin: opts.origin_icao.as_deref(),
+            destination: opts.destination_icao.as_deref(),
+            route_source_str: route_usable.then(|| format!("{:?}", route_state.source)),
+            waypoint_count: route_state.waypoints.len(),
+            route_usable,
             off_route_events,
-            completed: route_usable.then_some(route_complete),
-        };
-        debrief.phase_timeline = fd_debrief::phase_timeline_from_samples(
-            &samples
-                .iter()
-                .map(|s| (s.timestamp.ms, s.flight_phase.as_str()))
-                .collect::<Vec<_>>(),
-        );
-        debrief.fdm_summary = serde_json::json!({
-            "events": fdr_events,
-        });
-        debrief.approach = serde_json::to_value(&approach)?;
-        debrief.landing = serde_json::to_value(&landing)?;
-        debrief.shadow = serde_json::json!(match &shadow {
-            Some((_, rec, _)) => serde_json::to_value(rec.summary())?,
-            None => serde_json::Value::Null,
-        });
-        debrief.data_quality = fd_debrief::data_quality_summary(
-            samples.len() as u64,
-            samples.iter().map(|s| s.channel_quality.clone()),
-        );
+            route_complete,
+            samples: &samples,
+            fdm_events: fdr_events,
+            approach: &qoa.finish(),
+            runway: nav.as_ref().and_then(|n| n.runway.as_ref()),
+            shadow_summary: shadow.as_ref().map(|(_, rec, _, _)| rec.summary()),
+        })?;
         let json = debrief.to_json_pretty()?;
         std::fs::write(debrief_path, json).context("write debrief")?;
         println!("DEBRIEF: {}", debrief_path.display());
@@ -464,12 +422,6 @@ fn controller_phase(c: &MissionController) -> fd_mission::MissionPhase {
 
 fn controller_params(c: &MissionController) -> &MissionParameters {
     c.params()
-}
-
-/// A throwaway follower for the controller's signature; the observe path
-/// never uses its guidance (the shadow is read-only).
-fn dummy_follower(state: &RouteState) -> fd_mission::route::RouteFollower {
-    fd_mission::route::RouteFollower::new(state.waypoints.clone(), 2.5)
 }
 
 fn live_meta(
