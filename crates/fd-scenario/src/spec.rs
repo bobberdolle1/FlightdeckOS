@@ -57,6 +57,28 @@ pub struct ScenarioSpec {
     /// Deterministic fault injection (spec §41); omit for nominal runs.
     #[serde(default)]
     pub faults: Option<fd_virtual::faults::FaultConfig>,
+    /// Optional explicit route (Task 6 §18: operator/scenario route source).
+    /// Waypoints are carried into the report for route-monitor wiring.
+    #[serde(default)]
+    pub route: Option<RouteSpec>,
+}
+
+/// Scenario-declared route (Task 6 §17-18): an ordered waypoint list with
+/// scenario provenance. This is TEST vocabulary — the production route
+/// source is OpenAIRAC/operator input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSpec {
+    /// At least 2 waypoints; validated.
+    pub waypoints: Vec<WaypointSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaypointSpec {
+    pub id: String,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +207,20 @@ impl ScenarioSpec {
             return Err(ScenarioSpecError::Invalid(
                 "origin and destination are the same airport".into(),
             ));
+        }
+        if let Some(route) = &self.route {
+            if route.waypoints.len() < 2 {
+                return Err(ScenarioSpecError::Invalid(
+                    "route needs at least 2 waypoints".into(),
+                ));
+            }
+            for (i, w) in route.waypoints.iter().enumerate() {
+                if !w.id.trim().is_empty() && !w.lat_deg.is_finite() && !w.lon_deg.is_finite() {
+                    return Err(ScenarioSpecError::Invalid(format!(
+                        "route waypoint {i} invalid"
+                    )));
+                }
+            }
         }
         Ok(())
     }

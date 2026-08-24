@@ -55,6 +55,26 @@ pub struct FaultConfig {
     pub unknown_sensor_fields: Vec<String>,
     /// Adapter reports disconnected (poll/execute fail) while `tick < N`.
     pub disconnect_until_tick: u64,
+    /// Noisy touchdown: while `start_tick <= tick < start_tick + up_ticks`
+    /// the on-ground report flips to `false` (airborne) regardless of the
+    /// kinematic state, then returns to the true value. Models the brief
+    /// ground-flicker landing analysis must debounce (Task 6 §51).
+    pub on_ground_bounce: Option<BounceFault>,
+    /// Telemetry values freeze at their current readings while `tick < N`
+    /// but the CLOCK KEEPS ADVANCING — samples stay fresh-looking yet never
+    /// change (Task 6 §51 stale-injection; distinct from
+    /// `telemetry_freeze_until_tick`, which freezes the whole world
+    /// including time).
+    pub stale_values_until_tick: u64,
+}
+
+/// Noisy-touchdown window (Task 6 §51).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BounceFault {
+    /// First tick where on-ground reads `false`.
+    pub start_tick: u64,
+    /// How many ticks the false reading lasts.
+    pub up_ticks: u64,
 }
 
 impl FaultConfig {
@@ -96,6 +116,16 @@ impl FaultConfig {
             telemetry_freeze_until_tick: self.telemetry_freeze_until_tick,
             unknown_sensor_fields,
             disconnect_until_tick: self.disconnect_until_tick,
+            on_ground_bounce: self.on_ground_bounce,
+            stale_values_until_tick: self.stale_values_until_tick,
+        }
+    }
+
+    /// True when the bounce window covers `tick`.
+    pub fn bounce_active(&self, tick: u64) -> bool {
+        match self.on_ground_bounce {
+            Some(b) => tick >= b.start_tick && tick < b.start_tick + b.up_ticks,
+            None => false,
         }
     }
 
@@ -105,5 +135,7 @@ impl FaultConfig {
             && self.telemetry_freeze_until_tick == 0
             && self.disconnect_until_tick == 0
             && self.unknown_sensor_fields.is_empty()
+            && self.on_ground_bounce.is_none()
+            && self.stale_values_until_tick == 0
     }
 }

@@ -1,0 +1,43 @@
+# FlightdeckOS scenario — ROUTE DECLARATION + DEVIATION CONTEXT (Task 6 §18-20).
+#
+# The scenario declares an operator-style route that does NOT match the
+# flown direct mission: the report must carry the declared waypoints so the
+# route monitor can compute deviation downstream. The mission itself still
+# completes (the virtual model flies its own guidance — the route is
+# observation context, not control).
+#
+# HEADLESS VIRTUAL TEST.
+
+[scenario]
+id = "route-deviation"
+
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+on_ground = true
+
+[mission]
+cruise_altitude_ft = 30000.0
+
+[simulation]
+dt_ms = 100
+max_sim_seconds = 10800
+
+[route]
+waypoints = [
+    { id = "BESKI", lat_deg = 56.5, lon_deg = 35.0 },
+    { id = "PETUN", lat_deg = 58.0, lon_deg = 32.5 },
+    { id = "KODOL", lat_deg = 59.2, lon_deg = 31.0 },
+]

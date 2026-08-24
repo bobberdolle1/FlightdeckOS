@@ -29,6 +29,8 @@ pub struct VirtualSimulator {
     systems: SystemsState,
     /// Deterministic fault injection (spec §41); default = no faults.
     faults: FaultConfig,
+    /// Latched telemetry for the stale-values fault (Task 6 §51).
+    stale_latch: Option<TelemetrySnapshot>,
     /// Advance attempts (ticks requested), including frozen ones. The
     /// freeze window is measured in ATTEMPTS: a frozen world cannot advance
     /// its own clock, so the window can never elapse otherwise.
@@ -58,6 +60,7 @@ impl VirtualSimulator {
             systems: SystemsState::cold_and_dark(),
             faults: FaultConfig::default(),
             fault_ticks: 0,
+            stale_latch: None,
         }
     }
 
@@ -136,6 +139,16 @@ impl VirtualSimulator {
         self.systems.advance(self.clock.dt_ms);
         self.kinematics.advance(self.clock.dt_ms as f64 / 1000.0);
         self.clock.advance();
+        // Fault: stale values — the world advanced but the REPORTED
+        // telemetry latches at fault onset and stops changing while the
+        // window is active (clock keeps running: samples look fresh).
+        if self.fault_ticks <= self.faults.stale_values_until_tick {
+            if self.stale_latch.is_none() {
+                self.stale_latch = Some(self.snapshot());
+            }
+        } else {
+            self.stale_latch = None;
+        }
         self.snapshot()
     }
 
@@ -154,7 +167,15 @@ impl VirtualSimulator {
         s.heading_true = Some(AngleDeg::new(self.kinematics.heading_deg));
         s.pitch = Some(AngleDeg::new(self.kinematics.pitch_deg));
         s.bank = Some(AngleDeg::new(self.kinematics.bank_deg));
-        s.on_ground = Some(self.kinematics.on_ground);
+        s.on_ground = Some(
+            // Fault: noisy touchdown — forced airborne reading inside the
+            // bounce window (Task 6 §51).
+            if self.faults.bounce_active(self.fault_ticks) {
+                false
+            } else {
+                self.kinematics.on_ground
+            },
+        );
         s.gear_handle_down = Some(true); // fixed gear-down test model
         s.flaps_handle_index = Some(0);
         s.engine_combustion = Some([
@@ -188,6 +209,17 @@ impl VirtualSimulator {
         // Fault: unknown sensor fields — named canonical fields read back as
         // unknown (`None`). Names outside MASKABLE_FIELDS are rejected at
         // construction time, so every arm here covers a real field.
+        // Fault: stale values — report the latched snapshot instead of the
+        // live world (clock still advances, so timestamps stay fresh).
+        if self.fault_ticks <= self.faults.stale_values_until_tick
+            && let Some(latched) = &self.stale_latch
+        {
+            let mut out = latched.clone();
+            out.timestamp = s.timestamp;
+            out.sim_timing = s.sim_timing;
+            return out;
+        }
+
         for name in &self.faults.unknown_sensor_fields {
             match name.as_str() {
                 "position" => s.position = None,
@@ -435,6 +467,8 @@ mod tests {
                 telemetry_freeze_until_tick: 1,
                 disconnect_until_tick: 3,
                 unknown_sensor_fields: vec!["ias".into()],
+                on_ground_bounce: None,
+                stale_values_until_tick: 0,
             });
             let mut trace = Vec::new();
             for _ in 0..5 {
@@ -446,5 +480,65 @@ mod tests {
             trace
         };
         assert_eq!(run(), run());
+    }
+    #[test]
+    fn bounce_fault_forces_airborne_reading_inside_window() {
+        let mut s = sim().with_faults(FaultConfig {
+            on_ground_bounce: Some(crate::faults::BounceFault {
+                start_tick: 2,
+                up_ticks: 2,
+            }),
+            ..Default::default()
+        });
+        let mut readings = Vec::new();
+        for _ in 0..6 {
+            let snap = s.advance_tick();
+            readings.push(snap.on_ground);
+        }
+        // ticks 1..6 (fault_ticks 1..6): bounce at 2..3.
+        assert_eq!(
+            readings,
+            vec![
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true)
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_fault_freezes_values_but_clock_advances() {
+        let mut s = sim().with_faults(FaultConfig {
+            stale_values_until_tick: 3,
+            ..Default::default()
+        });
+        // Make the world move so "frozen values" is observable.
+        use fd_core::adapter::FlightControlTargets as _;
+        s.set_target_speed(200.0); // ground roll accelerates: observable drift
+        let first = s.advance_tick(); // tick 1: latch forms
+        let t_first = first.timestamp.ms;
+        let ias_first = first.indicated_airspeed;
+        // stale window covers fault ticks 1..=3; tick 1 formed the latch,
+        // so ticks 2..3 must serve it.
+        for _ in 0..2 {
+            let snap = s.advance_tick();
+            assert_eq!(
+                snap.indicated_airspeed, ias_first,
+                "values frozen while stale"
+            );
+            assert!(
+                snap.timestamp.ms > t_first,
+                "clock keeps advancing: samples look fresh"
+            );
+        }
+        // Window over: world moves again.
+        let after = s.advance_tick();
+        assert_ne!(
+            after.indicated_airspeed, ias_first,
+            "values resume after window"
+        );
     }
 }

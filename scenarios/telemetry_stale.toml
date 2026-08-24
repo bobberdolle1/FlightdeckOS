@@ -1,0 +1,37 @@
+# FlightdeckOS scenario — STALE TELEMETRY INJECTION (Task 6 §51).
+#
+# Values freeze for 3 s early in the climb while the clock keeps running:
+# analytics must treat the frozen samples as data, never crash, and the
+# mission must still complete once the window passes.
+#
+# HEADLESS VIRTUAL TEST.
+
+[scenario]
+id = "telemetry-stale"
+
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+on_ground = true
+
+[mission]
+cruise_altitude_ft = 30000.0
+
+[simulation]
+dt_ms = 100
+max_sim_seconds = 7200
+
+[faults]
+stale_values_until_tick = 30

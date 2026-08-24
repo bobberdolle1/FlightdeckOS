@@ -3,6 +3,14 @@
 use fd_core::capability::CapabilityEntry;
 use serde::{Deserialize, Serialize};
 
+/// One reported route waypoint (Task 6 §17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteWaypointReport {
+    pub id: String,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+}
+
 /// Overall scenario verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +59,10 @@ pub struct ScenarioReport {
     pub approach: ApproachSummary,
     pub landing: LandingSummary,
     pub autonomy: AutonomyMetrics,
+    /// Scenario-declared route waypoints (Task 6 §17-18), when present.
+    /// Carried for route-monitor wiring; absent = no route declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_waypoints: Option<Vec<RouteWaypointReport>>,
     pub final_phase: String,
     pub assertions_failed: Vec<String>,
     pub result: ScenarioResult,

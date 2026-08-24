@@ -451,6 +451,16 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         approach: approach_summary.unwrap_or_default(),
         landing: landing_summary,
         autonomy,
+        route_waypoints: spec.route.as_ref().map(|r| {
+            r.waypoints
+                .iter()
+                .map(|w| crate::report::RouteWaypointReport {
+                    id: w.id.clone(),
+                    lat_deg: w.lat_deg,
+                    lon_deg: w.lon_deg,
+                })
+                .collect()
+        }),
         final_phase: format!("{:?}", mission.phase()),
         assertions_failed,
         result,

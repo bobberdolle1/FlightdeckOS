@@ -1,0 +1,39 @@
+# FlightdeckOS scenario — NOISY TOUCHDOWN INJECTION (Task 6 §51).
+#
+# A deterministic on-ground bounce (forced airborne readings during the
+# takeoff roll) must not derail the mission: the phase engine and QoL
+# touchdown debounce must survive ground-flicker, and the flight completes.
+#
+# HEADLESS VIRTUAL TEST.
+
+[scenario]
+id = "on-ground-bounce"
+
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+on_ground = true
+
+[mission]
+cruise_altitude_ft = 30000.0
+
+[simulation]
+dt_ms = 100
+max_sim_seconds = 7200
+
+[faults]
+# Bounce during the takeoff roll (ticks 5-6): two forced airborne readings
+# right after brake release.
+on_ground_bounce = { start_tick = 5, up_ticks = 2 }
