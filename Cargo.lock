@@ -292,6 +292,7 @@ dependencies = [
 name = "fd-debrief"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "fd-core",
  "fd-fdm",
  "fd-mission",
