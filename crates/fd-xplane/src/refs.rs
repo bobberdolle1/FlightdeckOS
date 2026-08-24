@@ -25,6 +25,9 @@ pub enum DataRefId {
     ApVviStatus,
     /// The altitude dialed into the AP (read-back of the write target).
     ApAltitudeTarget,
+    /// Radio-altimeter indicated height, feet (pilot side). Preferred AGL
+    /// source over geometric `y_agl` once airborne.
+    RadioAltitudeFt,
 }
 
 impl DataRefId {
@@ -33,7 +36,7 @@ impl DataRefId {
         self as i32
     }
 
-    pub const ALL: [(DataRefId, &'static str); 16] = [
+    pub const ALL: [(DataRefId, &'static str); 17] = [
         (DataRefId::Latitude, "sim/flightmodel/position/latitude"),
         (DataRefId::Longitude, "sim/flightmodel/position/longitude"),
         (DataRefId::ElevationM, "sim/flightmodel/position/elevation"),
@@ -74,6 +77,10 @@ impl DataRefId {
             DataRefId::ApAltitudeTarget,
             "sim/cockpit/autopilot/altitude",
         ),
+        (
+            DataRefId::RadioAltitudeFt,
+            "sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot",
+        ),
     ];
 
     pub fn path(self) -> &'static str {
@@ -85,10 +92,8 @@ impl DataRefId {
     }
 }
 
-/// Extra read-only AP target used by the closed-loop smoke (the dialed
-/// altitude). Declared separately so `ALL` stays purely telemetry + status.
-#[derive(Debug, Clone, Copy)]
 /// Allowlisted WRITE datarefs (autopilot targets only).
+#[derive(Debug, Clone, Copy)]
 pub enum WriteRef {
     /// Magnetic heading target, degrees magnetic.
     ApHeadingMag,
@@ -136,6 +141,11 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), DataRefId::ALL.len());
+        assert_eq!(
+            DataRefId::ALL.len(),
+            17,
+            "whitelist is closed; extend deliberately"
+        );
     }
 
     #[test]
@@ -143,6 +153,10 @@ mod tests {
         assert_eq!(
             DataRefId::VerticalSpeedFpm.path(),
             "sim/flightmodel/position/vh_ind_fpm"
+        );
+        assert_eq!(
+            DataRefId::RadioAltitudeFt.path(),
+            "sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot"
         );
         assert_eq!(
             WriteRef::ApHeadingMag.path(),
