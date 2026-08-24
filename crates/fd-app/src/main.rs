@@ -89,6 +89,10 @@ enum Command {
         /// --allow-write). Verified only by fresh observed state.
         #[arg(long)]
         beacon: Option<String>,
+        /// Record a live FDR session (normalized telemetry + session
+        /// metadata) to this JSON file (spec §20).
+        #[arg(long)]
+        fdr_out: Option<PathBuf>,
     },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
@@ -142,6 +146,7 @@ fn main() -> anyhow::Result<()> {
             aircraft_icao,
             allow_write,
             beacon,
+            fdr_out,
         } => run_xplane_live(XplaneSmokeOpts {
             port,
             monitor_secs,
@@ -151,6 +156,7 @@ fn main() -> anyhow::Result<()> {
             aircraft_icao,
             allow_write,
             beacon,
+            fdr_out,
         }),
         Command::Replay {
             fixture,
@@ -657,6 +663,7 @@ struct XplaneSmokeOpts {
     aircraft_icao: Option<String>,
     allow_write: bool,
     beacon: Option<String>,
+    fdr_out: Option<PathBuf>,
 }
 
 fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
@@ -669,6 +676,7 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
         aircraft_icao,
         allow_write,
         beacon,
+        fdr_out,
     } = opts;
     use fd_core::adapter::{FlightControlTargets, SimulatorAdapter};
     use fd_core::capability::{CapabilityReport, CapabilityStatus, EvidenceSource};
@@ -832,6 +840,36 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Live FDR session (spec §20): normalized telemetry + real phase
+    // engine + FDM analysis, session metadata on exit.
+    let mut fdr = fdr_out.map(|path| {
+        let rec = fd_fdm::fdr::Recorder::new();
+        let started_wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64);
+        let meta = fd_fdm::fdr::FdrSessionMeta {
+            session_id: format!("live-{}", started_wall.unwrap_or(0)),
+            simulator: "X-Plane 12".into(),
+            sim_version: None, // filled after the loop via Web API probe
+            aircraft: adapter.identity().clone(),
+            fdos_version: env!("CARGO_PKG_VERSION").into(),
+            adapter_source: Some("xplane-udp".into()),
+            started_wall_unix_ms: started_wall,
+            ended_wall_unix_ms: None,
+            origin: None,
+            destination: None,
+            started_ms: 0,
+            ended_ms: None,
+        };
+        let rec = rec.with_meta(meta);
+        (rec, path)
+    });
+    let mut phase_engine = fd_core::phase::FlightPhaseEngine::new();
+    let mut fdm_live = fd_fdm::fdm::FdmAnalyzer::new_development_default();
+    let mut recording = fd_fdm::fdr::FlightRecording::default();
+    let mut fdr_events = 0u64;
+
     let mut last_heading_cmd: Option<(f64, std::time::Instant)> = None;
     let mut last_vs_cmd: Option<(f64, std::time::Instant)> = None;
     let mut was_connected = true;
@@ -883,6 +921,20 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
                 last_hz_t = std::time::Instant::now();
                 hz
             };
+            if let Some((rec, _)) = fdr.as_mut() {
+                let assessment = phase_engine.evaluate(&fd_core::phase::PhaseTelemetry::from(&s));
+                let sample = rec.record(&s, assessment.phase.as_str());
+                for ev in fdm_live.process(&sample) {
+                    fdr_events += 1;
+                    recording.push_event(fd_fdm::fdr::FdrEvent {
+                        seq: fdr_events,
+                        timestamp: sample.timestamp,
+                        kind: "fdm".into(),
+                        detail: format!("{:?} measured={:.0}", ev.kind, ev.measured),
+                    });
+                }
+                recording.push_sample(sample);
+            }
             println!(
                 "[t={:>5.1}s {:>4.0}Hz] lat={:<10} lon={:<10} msl={:>7.0}ft agl={:>7.0}ft ias={:>6.1} gs={:>6.1} vs={:>7.1} hdg={:>6.1} gnd={} ap={} pkt_age={:?}",
                 started.elapsed().as_secs_f64(),
@@ -928,5 +980,34 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
         adapter.packets_received(),
         adapter.disconnect_count()
     );
+    if let Some((rec, path)) = fdr {
+        let ended_wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64);
+        let ended = ended_wall;
+        let mut recording = std::mem::take(&mut recording);
+        // Stamp ended wall time into the meta we attached at start.
+        if let Some(m) = recording.meta.as_mut() {
+            m.ended_wall_unix_ms = ended;
+        }
+        let finished = rec.finish(recording);
+        match serde_json::to_string_pretty(&finished) {
+            Ok(json) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&path, json).map_err(|e| anyhow::anyhow!("fdr write: {e}"))?;
+                println!(
+                    "FDR_SESSION: {} samples={} events={} -> {}",
+                    finished.samples.len(),
+                    finished.samples.len(),
+                    finished.events.len(),
+                    path.display()
+                );
+            }
+            Err(e) => return Err(anyhow::anyhow!("fdr serialize: {e}")),
+        }
+    }
     Ok(())
 }

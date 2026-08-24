@@ -79,6 +79,29 @@ impl ValueBoard {
         }
     }
 
+    /// Channel quality for `id` at `now` (spec §21): Fresh when a recent
+    /// value exists, Stale when present but older than `after`, Missing
+    /// when never received.
+    pub fn quality(
+        &self,
+        id: i32,
+        now: Instant,
+        after: Duration,
+    ) -> fd_core::telemetry::DataQuality {
+        use fd_core::telemetry::DataQuality;
+        let entries = self.entries.lock();
+        match entries.get(&id) {
+            None => DataQuality::Missing,
+            Some((t, _)) => {
+                if now.duration_since(*t) > after {
+                    DataQuality::Stale
+                } else {
+                    DataQuality::Fresh
+                }
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.lock().len()
     }
@@ -242,6 +265,11 @@ impl XPlaneUdpClient {
             .map_err(|e| ClientError::Network(format!("rx thread spawn: {e}")))?;
         self.rx_thread = Some(handle);
         Ok(())
+    }
+
+    /// Channel quality as seen by the client (spec §21).
+    pub fn quality(&self, id: i32) -> fd_core::telemetry::DataQuality {
+        self.shared.board.quality(id, Instant::now(), STALE_AFTER)
     }
 
     /// Latest FRESH value received for a wire id. Values older than

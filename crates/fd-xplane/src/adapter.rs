@@ -255,6 +255,36 @@ impl XPlaneAdapter {
         } else {
             SimState::Unknown
         };
+        // Data-quality sidecar (spec §21): annotate every non-fresh core
+        // channel. Key = DataRefId wire id (the adapter's channel namespace).
+        let core_channels: [(DataRefId, bool); 12] = [
+            (DataRefId::Latitude, s.position.is_some()),
+            (DataRefId::Longitude, s.position.is_some()),
+            (DataRefId::ElevationM, s.altitude_msl.is_some()),
+            (DataRefId::YAglM, s.altitude_agl.is_some()),
+            (
+                DataRefId::IndicatedAirspeedKt,
+                s.indicated_airspeed.is_some(),
+            ),
+            (DataRefId::GroundspeedMs, s.groundspeed.is_some()),
+            (DataRefId::VerticalSpeedFpm, s.vertical_speed.is_some()),
+            (DataRefId::HeadingTrueDeg, s.heading_true.is_some()),
+            (DataRefId::PitchDeg, s.pitch.is_some()),
+            (DataRefId::BankDeg, s.bank.is_some()),
+            (DataRefId::OnGroundWheel0, s.on_ground.is_some()),
+            (DataRefId::BeaconOn, s.beacon_light.is_some()),
+        ];
+        for (id, fresh) in core_channels {
+            if fresh {
+                continue;
+            }
+            let q = match self.raw(id) {
+                // Received but unrepresentable: a distinct fact from absent.
+                Some(v) if !v.is_finite() => fd_core::telemetry::DataQuality::Invalid,
+                _ => self.client.quality(id.wire_id()),
+            };
+            s.channel_quality.insert(id.wire_id() as u16, q);
+        }
         s
     }
 

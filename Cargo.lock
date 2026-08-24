@@ -229,12 +229,14 @@ dependencies = [
  "fd-aircraft",
  "fd-core",
  "fd-crew",
+ "fd-fdm",
  "fd-openairac",
  "fd-runtime",
  "fd-scenario",
  "fd-simconnect",
  "fd-sop",
  "fd-xplane",
+ "serde_json",
 ]
 
 [[package]]

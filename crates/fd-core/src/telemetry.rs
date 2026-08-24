@@ -148,6 +148,22 @@ impl NavLogoMode {
     }
 }
 
+/// Per-channel data quality (spec §21): `missing`, `stale`, and
+/// `invalid` are different facts, and a stale value must never pass as
+/// fresh evidence for a flight-control post-condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataQuality {
+    /// Recent, plausible observation.
+    Fresh,
+    /// Present but older than the channel freshness window.
+    Stale,
+    /// Never received in this session.
+    Missing,
+    /// Received but non-finite / unrepresentable.
+    Invalid,
+}
+
 /// A single canonical snapshot of aircraft + simulator state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
@@ -185,6 +201,10 @@ pub struct TelemetrySnapshot {
     /// aircraft layer (fd-aircraft) owns their meaning. Absent key = unknown.
     #[serde(with = "ext_values_serde", default)]
     pub aircraft_values: BTreeMap<u16, f64>,
+    /// Quality annotations for channels that are NOT fresh (exception
+    /// list; absent = fresh). Serde-default so old recordings load.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channel_quality: BTreeMap<u16, DataQuality>,
 }
 
 impl TelemetrySnapshot {
@@ -192,6 +212,7 @@ impl TelemetrySnapshot {
     pub const fn empty(timestamp: SimTimestamp) -> Self {
         Self {
             timestamp,
+            channel_quality: BTreeMap::new(),
             position: None,
             altitude_msl: None,
             altitude_agl: None,

@@ -62,6 +62,17 @@ pub struct FdrSessionMeta {
     pub aircraft: AircraftIdentity,
     /// FlightdeckOS version that produced this recording.
     pub fdos_version: String,
+    /// Adapter/transport that produced the samples (e.g.
+    /// "xplane-udp", "virtual", "replay"). Diagnostics only.
+    #[serde(default)]
+    pub adapter_source: Option<String>,
+    /// Wall-clock start (unix ms) for cross-referencing logs. NOT part of
+    /// the deterministic timeline.
+    #[serde(default)]
+    pub started_wall_unix_ms: Option<u64>,
+    /// Wall-clock end (unix ms), stamped by `finish`.
+    #[serde(default)]
+    pub ended_wall_unix_ms: Option<u64>,
     /// Departure airport ICAO, when known.
     #[serde(default)]
     pub origin: Option<String>,
@@ -203,6 +214,9 @@ mod tests {
             sim_version: Some("12.1.4".to_string()),
             aircraft: AircraftIdentity::user_provided(Some("A320".to_string())),
             fdos_version: "0.1.0".to_string(),
+            adapter_source: None,
+            started_wall_unix_ms: None,
+            ended_wall_unix_ms: None,
             origin: Some("EDDF".to_string()),
             destination: Some("EDDM".to_string()),
             started_ms,
