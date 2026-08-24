@@ -65,6 +65,11 @@ pub fn parse_fixture(content: &str) -> Result<Vec<ReplayStep>, String> {
         }
         steps.push(parsed.step);
     }
+    if steps.is_empty() {
+        // Vacuous-success guard: an empty/all-comment fixture would
+        // otherwise "replay" zero ticks and report success on nothing.
+        return Err("fixture contains no replay steps".into());
+    }
     Ok(steps)
 }
 

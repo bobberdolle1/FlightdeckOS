@@ -21,6 +21,7 @@
 //! real flight dynamics.
 
 pub mod adapter;
+pub mod faults;
 
 pub use adapter::VirtualSimulator;
 pub use fd_core::adapter::FlightControlTargets;

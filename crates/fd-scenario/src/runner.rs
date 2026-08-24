@@ -75,6 +75,12 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         spec.initial_conditions.heading_deg,
         spec.simulation.dt_ms,
     )));
+    if let Some(faults) = &spec.faults {
+        faults
+            .validate()
+            .map_err(|e| format!("invalid [faults] in scenario: {e}"))?;
+        world.borrow_mut().set_faults(faults.clone());
+    }
     {
         let mut w = world.borrow_mut();
         w.systems_mut()
@@ -258,11 +264,6 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         }
     });
     let landing_report = qol::analyze(&recording.samples);
-    let landing_summary = LandingSummary {
-        touchdown_occurred: landing_report.timestamp_ms.is_some(),
-        touchdown_vertical_speed_fpm: landing_report.touchdown_vertical_speed_fpm,
-        touchdown_pitch_deg: landing_report.touchdown_pitch_deg,
-    };
 
     let trace_text = std::fs::read_to_string(&trace_path).unwrap_or_default();
     let mut autonomy = AutonomyMetrics::default();
@@ -281,6 +282,56 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
             autonomy.procedure_steps_failed += 1;
         }
     }
+
+    // Scenario verdict (spec §40): a nominal scenario PASSES only when the
+    // mission reached Completed. Mission Failed, or the tick budget
+    // exhausting before completion, is a FAILED scenario — never a silent
+    // false success. `expected_failure` inverts this for negative
+    // scenarios: the run passes when the failure was correctly DETECTED.
+    let mission_failed = matches!(mission.phase(), fd_mission::MissionPhase::Failed);
+    let timed_out = !matches!(mission.phase(), fd_mission::MissionPhase::Completed);
+    let mut assertions_failed: Vec<String> = Vec::new();
+    if autonomy.actions_failed > 0 {
+        assertions_failed.push(format!(
+            "{} dispatched action(s) failed post-condition verification",
+            autonomy.actions_failed
+        ));
+    }
+    let nominal_failure = mission_failed || timed_out || autonomy.actions_failed > 0;
+    let mut result = if nominal_failure {
+        let reason = if mission_failed {
+            assertions_failed.push(format!("mission failed in phase {:?}", mission.phase()));
+            format!("mission failed in phase {:?}", mission.phase())
+        } else {
+            assertions_failed.push(format!(
+                "mission did not complete within the tick budget (phase {:?})",
+                mission.phase()
+            ));
+            format!(
+                "mission did not complete within the tick budget (phase {:?})",
+                mission.phase()
+            )
+        };
+        ScenarioResult::Failed { reason }
+    } else {
+        ScenarioResult::Passed
+    };
+    if spec.scenario.expected_failure {
+        result = if nominal_failure {
+            ScenarioResult::Passed
+        } else {
+            assertions_failed
+                .push("expected failure did not occur: mission completed nominally".into());
+            ScenarioResult::Failed {
+                reason: "expected failure did not occur: mission completed nominally".into(),
+            }
+        };
+    }
+    let landing_summary = LandingSummary {
+        touchdown_occurred: landing_report.timestamp_ms.is_some(),
+        touchdown_vertical_speed_fpm: landing_report.touchdown_vertical_speed_fpm,
+        touchdown_pitch_deg: landing_report.touchdown_pitch_deg,
+    };
 
     let mut fdm_summary: Vec<FdmEventSummary> = Vec::new();
     for e in fdm.events() {
@@ -358,7 +409,7 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         landing: landing_summary,
         autonomy,
         final_phase: format!("{:?}", mission.phase()),
-        assertions_failed: Vec::new(),
-        result: ScenarioResult::Passed,
+        assertions_failed,
+        result,
     })
 }
