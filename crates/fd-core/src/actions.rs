@@ -199,6 +199,11 @@ pub struct CatalogEntry {
     pub preconditions: Vec<PreconditionDef>,
     /// How to verify this action's post-condition against observed state.
     pub verify: VerifyFn,
+    /// Transport channel ids (wire ids) the verifier reads. The executor
+    /// refuses to verify from a snapshot where any listed channel is not
+    /// `Fresh` (Task 6 §8: warm-up must not let cached or transient state
+    /// verify an action). Empty = no channel gate (legacy behavior).
+    pub verification_channels: Vec<u16>,
 }
 
 /// The closed action catalog. Lookup is by [`ActionKind`]; an unknown kind is
@@ -235,6 +240,7 @@ mod tests {
                 kind: ActionKind::SetBeacon,
                 preconditions: Vec::new(),
                 verify: |_, _| Some(true),
+                verification_channels: Vec::new(),
             }],
         };
         assert!(cat.lookup(ActionKind::SetBeacon).is_some());

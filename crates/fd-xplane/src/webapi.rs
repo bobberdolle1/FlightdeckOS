@@ -151,6 +151,9 @@ pub struct HttpTransport {
 impl HttpTransport {
     pub fn new(base_url: &str) -> Result<Self, WebApiError> {
         let client = reqwest::blocking::Client::builder()
+            // Bounded connect + total time (Task 6 §45): a wedged server
+            // must surface as an error, never an unbounded hang.
+            .connect_timeout(std::time::Duration::from_secs(2))
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .map_err(|e| WebApiError::Transport(e.to_string()))?;

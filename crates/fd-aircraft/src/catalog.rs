@@ -65,6 +65,10 @@ pub fn a32nx_default_catalog() -> ActionCatalog {
                     check: pre_beacon_state_known,
                 }],
                 verify: verify_beacon,
+                // X-Plane UDP wire id of sim/cockpit2/switches/beacon_on
+                // (fd-xplane DataRefId::BeaconOn = 17; cross-checked by an
+                // fd-xplane test). The verifier reads exactly this channel.
+                verification_channels: vec![17],
             },
             CatalogEntry {
                 kind: ActionKind::SetNavLogo,
@@ -73,6 +77,9 @@ pub fn a32nx_default_catalog() -> ActionCatalog {
                     check: pre_nav_logo_state_known,
                 }],
                 verify: verify_nav_logo,
+                // Aircraft-extension channel; warm-up gate not applicable
+                // (extension ids are not UDP-subscribed core channels).
+                verification_channels: Vec::new(),
             },
         ],
     }

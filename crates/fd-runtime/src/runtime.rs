@@ -370,6 +370,7 @@ mod tests {
                         .map(|on| on == matches!(pos, SwitchPosition::On)),
                     _ => None,
                 },
+                verification_channels: Vec::new(),
             }],
         }
     }

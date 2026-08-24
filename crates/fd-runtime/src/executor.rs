@@ -220,10 +220,25 @@ impl ActionExecutor {
                         // verification result — but the deadline keeps
                         // running, so a stalled feed still times out.
                         let fresh = snapshot.timestamp.ms > rec.dispatched_ts_ms;
+                        // Channel gate (Task 6 §8): every verification
+                        // channel must be Fresh in this snapshot. Absent
+                        // from the exception map = fresh (legacy). A
+                        // WarmingUp/Stale/Invalid channel is inadmissible
+                        // evidence; the deadline still runs.
+                        let channels_ok = catalog
+                            .lookup(rec.request.action.kind())
+                            .map(|entry| {
+                                entry.verification_channels.iter().all(|ch| {
+                                    snapshot.channel_quality.get(ch).is_none_or(|q| {
+                                        *q == fd_core::telemetry::DataQuality::Fresh
+                                    })
+                                })
+                            })
+                            .unwrap_or(true);
                         let verify = rec
                             .verify
                             .expect("validated action always carries its verifier");
-                        let verify_result = if fresh {
+                        let verify_result = if fresh && channels_ok {
                             verify(rec.request.action, snapshot)
                         } else {
                             None // no admissible evidence yet
@@ -333,6 +348,7 @@ mod tests {
                         .map(|on| on == matches!(pos, SwitchPosition::On)),
                     _ => None,
                 },
+                verification_channels: Vec::new(),
             }],
         }
     }
@@ -684,5 +700,64 @@ mod tests {
                 "injected failure".into(),
             ))
         }
+    }
+    #[test]
+    fn warming_up_verification_channel_blocks_verify_until_fresh() {
+        use fd_core::actions::{ActionCatalog, ActionKind, CatalogEntry, PreconditionDef};
+        use fd_core::telemetry::DataQuality;
+        use std::collections::BTreeMap;
+        let mut ex = ActionExecutor::new(DeadlineTicks(50));
+        // Catalog whose SetBeacon verifies through wire channel 17.
+        let cat = ActionCatalog {
+            entries: vec![CatalogEntry {
+                kind: ActionKind::SetBeacon,
+                preconditions: vec![PreconditionDef {
+                    id: "beacon_state_known",
+                    check: |s| {
+                        if s.beacon_light.is_some() {
+                            Ok(())
+                        } else {
+                            Err("beacon state unknown")
+                        }
+                    },
+                }],
+                verify: |a, s| match a {
+                    CockpitAction::SetBeacon(pos) => s
+                        .beacon_light
+                        .map(|on| on == matches!(pos, SwitchPosition::On)),
+                    _ => None,
+                },
+                verification_channels: vec![17],
+            }],
+        };
+        let mut adapter = ReplayAdapter::new(Vec::new());
+        let id = submit_beacon(&mut ex, 1);
+        // Validate + dispatch against a snapshot where the channel is warm.
+        let mut warm = snapshot_with_beacon(10, Some(false));
+        warm.channel_quality = BTreeMap::new(); // fresh default
+        let evts = ex.advance(&cat, &mut adapter, &warm);
+        assert!(!evts.is_empty(), "validate+dispatch: {evts:?}");
+        // Post-dispatch snapshot: beacon flipped ON (would satisfy the
+        // verifier) but channel 17 is WARMING UP — inadmissible evidence.
+        let mut transient = snapshot_with_beacon(20, Some(true));
+        transient
+            .channel_quality
+            .insert(17u16, DataQuality::WarmingUp);
+        let evts = ex.advance(&cat, &mut adapter, &transient);
+        assert!(
+            !evts
+                .iter()
+                .any(|e| matches!(e, TraceEvent::ActionVerified { .. })),
+            "warming-up channel must NOT verify: {evts:?}"
+        );
+        // Channel goes Fresh (absent from the exception map): now verifies.
+        let fresh = snapshot_with_beacon(30, Some(true));
+        let evts = ex.advance(&cat, &mut adapter, &fresh);
+        assert!(
+            evts.iter()
+                .any(|e| matches!(e, TraceEvent::ActionVerified { .. })),
+            "fresh channel verifies: {evts:?}"
+        );
+        let _ = id;
     }
 }

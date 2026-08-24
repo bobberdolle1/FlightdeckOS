@@ -156,6 +156,12 @@ impl NavLogoMode {
 pub enum DataQuality {
     /// Recent, plausible observation.
     Fresh,
+    /// Received in this session but not yet authoritative: fewer than the
+    /// adapter's warm-up sample count of consecutive consistent observations
+    /// (Task 6 §7). A newly connected channel must not become evidence from
+    /// a single potentially transient sample. WarmingUp data never verifies
+    /// an action and never satisfies a positive safety condition.
+    WarmingUp,
     /// Present but older than the channel freshness window.
     Stale,
     /// Never received in this session.

@@ -77,6 +77,81 @@ pub struct XPlaneAdapter {
     /// Number of poll cycles that observed a disconnected transport.
     disconnects: u64,
     last_poll_duration: Option<Duration>,
+    /// Per-channel consecutive finite-sample counter (wire id -> count).
+    /// A channel becomes authoritative (Fresh) only after
+    /// [`WARMUP_SAMPLES`] consecutive finite observations (Task 6 §7).
+    warmup: std::collections::HashMap<i32, u32>,
+    /// Web API health tracking (Task 6 §45): bounded failures with a
+    /// cooldown instead of request spam or unbounded hangs.
+    web_health: WebHealth,
+    /// Previous health() poll for UDP packet-rate estimation.
+    rate_probe: Option<(std::time::Instant, u64)>,
+}
+
+/// DEVELOPMENT DEFAULT warm-up sample count: ~1 s of consistent stream at
+/// the 3-4 Hz subscribe rate. Evidence-based: consecutive consistent
+/// observations, not a wall-clock sleep.
+pub const WARMUP_SAMPLES: u32 = 3;
+
+/// DEVELOPMENT DEFAULT web API cooldown after a transport failure: no
+/// request is attempted while cooling down (no localhost spam).
+pub const WEB_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// DEVELOPMENT DEFAULT UDP health windows.
+pub const UDP_DEGRADED_AFTER: Duration = Duration::from_secs(3);
+pub const UDP_UNAVAILABLE_AFTER: Duration = Duration::from_secs(10);
+
+/// Transport capability states (Task 6 §45/§47): UDP and Web API are
+/// reported INDEPENDENTLY — one being healthy says nothing about the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Available,
+    Degraded,
+    Unavailable,
+}
+
+/// Multi-transport health snapshot (Task 6 §47). Answers: is UDP working?
+/// is the Web API working? — without equating them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TransportHealth {
+    pub udp: HealthState,
+    pub web_api: HealthState,
+    pub udp_last_packet_age: Option<Duration>,
+    pub udp_packet_rate_hz: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct WebHealth {
+    last_ok: Option<std::time::Instant>,
+    cooldown_until: Option<std::time::Instant>,
+    last_error: Option<String>,
+}
+
+impl WebHealth {
+    /// Gate a web operation: refuse immediately while cooling down.
+    fn gate(&mut self) -> Result<(), AdapterError> {
+        if let Some(until) = self.cooldown_until {
+            if std::time::Instant::now() < until {
+                return Err(AdapterError::WriteFailed(
+                    "web api cooling down after transport failure".into(),
+                ));
+            }
+            self.cooldown_until = None;
+        }
+        Ok(())
+    }
+
+    fn note_ok(&mut self) {
+        self.last_ok = Some(std::time::Instant::now());
+        self.last_error = None;
+        self.cooldown_until = None;
+    }
+
+    fn note_fail(&mut self, e: &str) {
+        self.last_error = Some(e.to_string());
+        self.cooldown_until = Some(std::time::Instant::now() + WEB_COOLDOWN);
+    }
 }
 
 impl XPlaneAdapter {
@@ -113,6 +188,9 @@ impl XPlaneAdapter {
             identity,
             last_control_error: None,
             web: Some(web),
+            warmup: std::collections::HashMap::new(),
+            web_health: WebHealth::default(),
+            rate_probe: None,
             write_guard,
             disconnects: 0,
             last_poll_duration: None,
@@ -128,8 +206,21 @@ impl XPlaneAdapter {
     /// (`GET /api/capabilities`). `None` when the API is unavailable —
     /// telemetry does not depend on it.
     pub fn simulator_version(&mut self) -> Option<String> {
+        if self.web_health.gate().is_err() {
+            return None;
+        }
         let web = self.web.as_mut()?;
-        web.capabilities().ok().map(|c| c.x_plane.version)
+        let result = web.capabilities();
+        match &result {
+            Ok(_) => self.web_health.note_ok(),
+            Err(e) => self.web_health.note_fail(&e.to_string()),
+        }
+        result.ok().map(|c| c.x_plane.version)
+    }
+
+    /// Local UDP bind port (test/observability hook).
+    pub fn local_port(&self) -> u16 {
+        self.client.local_port
     }
 
     /// Current beacon state as observed over UDP telemetry (None = unknown).
@@ -149,6 +240,19 @@ impl XPlaneAdapter {
             web.invalidate_session();
         }
         self.last_control_error = None;
+        // Aircraft-specific channels must re-warm for the next aircraft
+        // (Task 6 §42): no stale-fresh carryover across a hot-swap.
+        self.warmup.clear();
+    }
+
+    /// Update the operator identity claim. A CHANGED claim invalidates
+    /// aircraft-specific state exactly like [`Self::invalidate_aircraft`]
+    /// (Task 6 §42); an unchanged claim is a no-op.
+    pub fn set_identity_claim(&mut self, claim: AircraftIdentity) {
+        if self.identity.icao != claim.icao {
+            self.invalidate_aircraft();
+            self.identity = claim;
+        }
     }
 
     /// The aircraft identity this adapter was constructed with.
@@ -237,7 +341,7 @@ impl XPlaneAdapter {
         self.raw(id).filter(|v| v.is_finite())
     }
 
-    fn build_snapshot(&self) -> TelemetrySnapshot {
+    fn build_snapshot(&mut self) -> TelemetrySnapshot {
         let mut s = TelemetrySnapshot::empty(SimTimestamp::new(epoch_ms()));
         let lat = self.value(DataRefId::Latitude);
         let lon = self.value(DataRefId::Longitude);
@@ -302,17 +406,80 @@ impl XPlaneAdapter {
             (DataRefId::BeaconOn, s.beacon_light.is_some()),
         ];
         for (id, fresh) in core_channels {
-            if fresh {
-                continue;
-            }
-            let q = match self.raw(id) {
+            let wire = id.wire_id();
+            let raw = self.raw(id);
+            match raw {
                 // Received but unrepresentable: a distinct fact from absent.
-                Some(v) if !v.is_finite() => fd_core::telemetry::DataQuality::Invalid,
-                _ => self.client.quality(id.wire_id()),
-            };
-            s.channel_quality.insert(id.wire_id() as u16, q);
+                Some(v) if !v.is_finite() => {
+                    self.warmup.insert(wire, 0);
+                    s.channel_quality
+                        .insert(wire as u16, fd_core::telemetry::DataQuality::Invalid);
+                }
+                Some(_) => {
+                    let count = self.warmup.entry(wire).and_modify(|c| *c += 1).or_insert(1);
+                    if *count < WARMUP_SAMPLES {
+                        // Present but not yet authoritative (Task 6 §7).
+                        s.channel_quality
+                            .insert(wire as u16, fd_core::telemetry::DataQuality::WarmingUp);
+                    } else if !fresh {
+                        // Warmed but outside the freshness window.
+                        let q = self.client.quality(wire);
+                        s.channel_quality.insert(wire as u16, q);
+                    }
+                }
+                None => {
+                    self.warmup.insert(wire, 0);
+                    let q = self.client.quality(wire);
+                    s.channel_quality.insert(wire as u16, q);
+                }
+            }
         }
         s
+    }
+
+    /// Multi-transport health (Task 6 §45/§47). Cheap: no I/O, no probes.
+    pub fn health(&mut self) -> TransportHealth {
+        let udp_age = self.client.newest_packet_age();
+        let udp = if udp_age == Duration::MAX || udp_age > UDP_UNAVAILABLE_AFTER {
+            HealthState::Unavailable
+        } else if udp_age > UDP_DEGRADED_AFTER {
+            HealthState::Degraded
+        } else {
+            HealthState::Available
+        };
+        let web = if self
+            .web_health
+            .cooldown_until
+            .map(|until| std::time::Instant::now() < until)
+            .unwrap_or(false)
+        {
+            HealthState::Unavailable
+        } else {
+            match (self.web_health.last_ok, &self.web_health.last_error) {
+                (Some(t), _) if t.elapsed() < Duration::from_secs(30) => HealthState::Available,
+                (Some(_), _) => HealthState::Degraded,
+                (None, Some(_)) => HealthState::Unavailable,
+                (None, None) => HealthState::Degraded, // never exercised yet
+            }
+        };
+        // UDP packet rate from the previous health() probe.
+        let now = std::time::Instant::now();
+        let total = self.client.packets_received();
+        let rate = self.rate_probe.replace((now, total)).map(|(t0, p0)| {
+            let dt = now.duration_since(t0).as_secs_f64();
+            if dt > 0.0 {
+                Some((total - p0) as f64 / dt)
+            } else {
+                None
+            }
+        });
+        let udp_last_packet_age = (udp_age != Duration::MAX).then_some(udp_age);
+        TransportHealth {
+            udp,
+            web_api: web,
+            udp_last_packet_age,
+            udp_packet_rate_hz: rate.flatten(),
+        }
     }
 
     /// Validate a control target before it may reach the wire: non-finite
@@ -441,10 +608,18 @@ impl XPlaneAdapter {
         } else {
             BEACON_OFF_COMMAND
         };
+        self.web_health.gate()?;
         match self.web.as_mut() {
-            Some(web) => web
-                .activate_command(name)
-                .map_err(|e| AdapterError::WriteFailed(e.to_string())),
+            Some(web) => match web.activate_command(name) {
+                Ok(v) => {
+                    self.web_health.note_ok();
+                    Ok(v)
+                }
+                Err(e) => {
+                    self.web_health.note_fail(&e.to_string());
+                    Err(AdapterError::WriteFailed(e.to_string()))
+                }
+            },
             None => Err(AdapterError::WriteFailed(
                 "web api client unavailable".into(),
             )),
@@ -582,5 +757,212 @@ mod lifecycle_tests {
         identity = AircraftIdentity::unknown();
         assert_eq!(identity.source, IdentitySource::Unknown);
         assert_eq!(identity.icao, None);
+    }
+    use super::*;
+
+    /// Mock X-Plane: replies to RREF subscriptions with records.
+    struct MockSim {
+        socket: std::net::UdpSocket,
+    }
+
+    impl MockSim {
+        fn bind() -> Self {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            Self { socket }
+        }
+
+        /// Serve one subscription then stream `values` n times to the
+        /// adapter's local UDP port.
+        fn stream(&self, adapter_port: u16, values: &[(i32, f32)], times: usize) {
+            let mut buf = [0u8; 2048];
+            let _ = self.socket.recv_from(&mut buf); // subscription
+            let dest = format!("127.0.0.1:{adapter_port}");
+            for _ in 0..times {
+                let mut pkt = b"RREF,".to_vec();
+                for (id, v) in values {
+                    pkt.extend_from_slice(&id.to_le_bytes());
+                    pkt.extend_from_slice(&v.to_le_bytes());
+                }
+                self.socket.send_to(&pkt, &dest).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn test_cfg(port: u16) -> XPlaneConfig {
+        XPlaneConfig {
+            host: "127.0.0.1".into(),
+            port,
+            subscribe_hz: 50,
+            web_api_base: "http://127.0.0.1:1".into(), // nothing listens: bounded refuse
+            allow_writes: false,
+        }
+    }
+
+    #[test]
+    fn beacon_wire_id_is_stable_for_catalog_gate() {
+        // fd-aircraft's SetBeacon entry pins verification channel 17; this
+        // test fails loudly if the wire id ever moves.
+        assert_eq!(DataRefId::BeaconOn.wire_id(), 17);
+    }
+
+    #[test]
+    fn warmup_channel_becomes_fresh_after_three_consistent_samples() {
+        let sim = MockSim::bind();
+        let mut adapter = XPlaneAdapter::with_identity(
+            test_cfg(sim.socket.local_addr().unwrap().port()),
+            AircraftIdentity::unknown(),
+        )
+        .unwrap();
+        sim.stream(
+            adapter.local_port(),
+            &[(DataRefId::BeaconOn.wire_id(), 1.0)],
+            4,
+        );
+        // First observation: WarmingUp.
+        let snaps = adapter.poll().unwrap();
+        let s1 = snaps.last().unwrap();
+        assert_eq!(
+            s1.channel_quality
+                .get(&(DataRefId::BeaconOn.wire_id() as u16)),
+            Some(&fd_core::telemetry::DataQuality::WarmingUp),
+            "first sample must be WarmingUp, not authoritative"
+        );
+        // Second: still WarmingUp.
+        let snaps = adapter.poll().unwrap();
+        let s2 = snaps.last().unwrap();
+        assert_eq!(
+            s2.channel_quality
+                .get(&(DataRefId::BeaconOn.wire_id() as u16)),
+            Some(&fd_core::telemetry::DataQuality::WarmingUp)
+        );
+        // Third: warmed — absent from the exception map (fresh by default).
+        let snaps = adapter.poll().unwrap();
+        let s3 = snaps.last().unwrap();
+        assert_eq!(
+            s3.channel_quality
+                .get(&(DataRefId::BeaconOn.wire_id() as u16)),
+            None,
+            "warmed channel returns to the fresh default (no annotation)"
+        );
+    }
+
+    #[test]
+    fn identity_change_resets_warmup() {
+        let sim = MockSim::bind();
+        let sim_port = sim.socket.local_addr().unwrap().port();
+        let claim = AircraftIdentity {
+            icao: Some("C172".into()),
+            tail_number: None,
+            author: None,
+            description: None,
+            acf_name: None,
+            source: fd_core::identity::IdentitySource::UserProvided,
+        };
+        let mut adapter = XPlaneAdapter::with_identity(test_cfg(sim_port), claim.clone()).unwrap();
+        sim.stream(
+            adapter.local_port(),
+            &[(DataRefId::BeaconOn.wire_id(), 1.0)],
+            3,
+        );
+        for _ in 0..3 {
+            adapter.poll().unwrap();
+        }
+        // Warmed: no annotation.
+        let snaps = adapter.poll().unwrap();
+        assert_eq!(
+            snaps
+                .last()
+                .unwrap()
+                .channel_quality
+                .get(&(DataRefId::BeaconOn.wire_id() as u16)),
+            None
+        );
+        // Aircraft hot-swap: warm-up state must clear (Task 6 §42).
+        let new_claim = AircraftIdentity {
+            icao: Some("B738".into()),
+            ..claim
+        };
+        adapter.set_identity_claim(new_claim);
+        sim.stream(
+            adapter.local_port(),
+            &[(DataRefId::BeaconOn.wire_id(), 1.0)],
+            1,
+        );
+        let snaps = adapter.poll().unwrap();
+        assert_eq!(
+            snaps
+                .last()
+                .unwrap()
+                .channel_quality
+                .get(&(DataRefId::BeaconOn.wire_id() as u16)),
+            Some(&fd_core::telemetry::DataQuality::WarmingUp),
+            "post-swap channels re-warm; no stale-fresh carryover"
+        );
+    }
+
+    #[test]
+    fn web_failure_sets_cooldown_and_health_unavailable() {
+        let sim = MockSim::bind();
+        let mut adapter = XPlaneAdapter::with_identity(
+            test_cfg(sim.socket.local_addr().unwrap().port()),
+            AircraftIdentity::unknown(),
+        )
+        .unwrap();
+        // web_api_base points at port 1 (nothing listens): bounded refuse.
+        assert!(adapter.simulator_version().is_none());
+        let h = adapter.health();
+        assert_eq!(
+            h.web_api,
+            HealthState::Unavailable,
+            "failed web api is Unavailable"
+        );
+        // Cooldown: a second attempt is refused without touching the wire.
+        assert!(adapter.simulator_version().is_none());
+    }
+
+    #[test]
+    fn udp_health_tracks_packet_flow() {
+        let sim = MockSim::bind();
+        let mut adapter = XPlaneAdapter::with_identity(
+            test_cfg(sim.socket.local_addr().unwrap().port()),
+            AircraftIdentity::unknown(),
+        )
+        .unwrap();
+        sim.stream(
+            adapter.local_port(),
+            &[(DataRefId::BeaconOn.wire_id(), 1.0)],
+            3,
+        );
+        for _ in 0..3 {
+            adapter.poll().unwrap();
+        }
+        // First health() call calibrates the rate probe; packets must flow
+        // during the measurement window, so stream in the background.
+        let port = adapter.local_port();
+        let streamer = std::thread::spawn(move || {
+            let pkt = {
+                let mut p = b"RREF,".to_vec();
+                let id = DataRefId::BeaconOn.wire_id();
+                p.extend_from_slice(&id.to_le_bytes());
+                p.extend_from_slice(&1.0f32.to_le_bytes());
+                p
+            };
+            let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            for _ in 0..15 {
+                sock.send_to(&pkt, format!("127.0.0.1:{port}")).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let _ = adapter.health();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let h = adapter.health();
+        streamer.join().unwrap();
+        assert_eq!(h.udp, HealthState::Available);
+        assert!(
+            h.udp_packet_rate_hz.unwrap_or(0.0) > 0.0,
+            "rate {:?}",
+            h.udp_packet_rate_hz
+        );
     }
 }
