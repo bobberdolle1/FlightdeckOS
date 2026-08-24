@@ -132,6 +132,42 @@ pub struct ShadowEntry {
     pub divergences: Vec<String>,
 }
 
+impl ShadowEntry {
+    /// Classify channel `i` for this entry (spec §25): Match / Divergence
+    /// / Unknown (observed absent) / NotComparable (mission silent).
+    /// Unknown and NotComparable never count as matches and are excluded
+    /// from the match-ratio denominator.
+    pub fn classify_channel(&self, i: usize) -> ChannelClass {
+        let pairs = self.observed.pairs(&self.intended);
+        let (intended, observed) = pairs[i];
+        match (intended, observed) {
+            (None, _) => ChannelClass::NotComparable,
+            (Some(_), None) => ChannelClass::Unknown,
+            (Some(w), Some(g)) => {
+                if within_tolerance(i, w, g) {
+                    ChannelClass::Match
+                } else {
+                    ChannelClass::Divergence
+                }
+            }
+        }
+    }
+}
+
+/// Per-channel comparison classification (spec §25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelClass {
+    /// Both sides present, within tolerance.
+    Match,
+    /// Both sides present, outside tolerance.
+    Divergence,
+    /// Observed side unknown: absence of evidence — excluded from the
+    /// accuracy denominator, never a match.
+    Unknown,
+    /// The mission intends nothing on this channel: nothing to compare.
+    NotComparable,
+}
+
 /// Running per-channel comparison statistics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChannelStats {
@@ -501,5 +537,116 @@ mod tests {
             None
         );
         assert_eq!(controller.phase(), MissionPhase::Climb);
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use crate::controller::MissionCommands;
+
+    fn entry(intended: MissionCommands, observed: ObservedApTargets) -> ShadowEntry {
+        ShadowEntry {
+            sample_seq: 0,
+            phase: MissionPhase::Cruise,
+            intended,
+            observed,
+            matches: [false; chan::COUNT],
+            divergences: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classification_is_four_way() {
+        // Build via observe to reuse the real pairing logic.
+        let mut sh = MissionShadow::default();
+        let ctx = test_context(10_000.0, 250.0, 45.0, 500.0, 0.0);
+        // Cruise hold intends the cruise altitude (default 34000):
+        // observed 34000 (match), 18000 (divergence), None (unknown).
+        sh.observe(
+            1,
+            MissionPhase::Cruise,
+            &ctx,
+            &MissionParameters::default(),
+            ObservedApTargets {
+                altitude_ft: Some(34_000.0),
+                speed_kt: None,
+                heading_deg: None,
+                vertical_speed_fpm: None,
+            },
+        );
+        sh.observe(
+            2,
+            MissionPhase::Cruise,
+            &ctx,
+            &MissionParameters::default(),
+            ObservedApTargets {
+                altitude_ft: Some(18_000.0),
+                speed_kt: None,
+                heading_deg: None,
+                vertical_speed_fpm: None,
+            },
+        );
+        sh.observe(
+            3,
+            MissionPhase::Cruise,
+            &ctx,
+            &MissionParameters::default(),
+            ObservedApTargets {
+                altitude_ft: None,
+                speed_kt: None,
+                heading_deg: None,
+                vertical_speed_fpm: None,
+            },
+        );
+        let e = sh.entries();
+        assert_eq!(e[0].classify_channel(chan::ALTITUDE), ChannelClass::Match);
+        assert_eq!(
+            e[1].classify_channel(chan::ALTITUDE),
+            ChannelClass::Divergence
+        );
+        assert_eq!(e[2].classify_channel(chan::ALTITUDE), ChannelClass::Unknown);
+        // Mission-silent channel (no VS command in cruise hold) is
+        // NotComparable regardless of observation.
+        assert_eq!(
+            e[0].classify_channel(chan::VERTICAL_SPEED),
+            ChannelClass::NotComparable
+        );
+        // Unknown never counts as match and stays out of the denominator.
+        let report = sh.report();
+        let alt = &report.channels[chan::ALTITUDE];
+        assert_eq!(alt.evaluated, 2, "unknown excluded from denominator");
+        assert_eq!(alt.matched, 1);
+        assert_eq!(alt.diverged, 1);
+    }
+
+    fn test_context(alt: f64, ias: f64, hdg: f64, dist: f64, _vs: f64) -> MissionContext<'static> {
+        let snap = Box::leak(Box::new(fd_core::telemetry::TelemetrySnapshot {
+            timestamp: fd_core::telemetry::SimTimestamp::new(0),
+            position: None,
+            altitude_msl: Some(fd_core::units::AltitudeFt::new(alt)),
+            altitude_agl: None,
+            groundspeed: Some(fd_core::units::SpeedKt::new(ias)),
+            indicated_airspeed: Some(fd_core::units::SpeedKt::new(ias)),
+            vertical_speed: Some(fd_core::units::VerticalSpeedFpm::new(0.0)),
+            heading_true: Some(fd_core::units::AngleDeg::new(hdg)),
+            pitch: None,
+            bank: None,
+            on_ground: Some(false),
+            gear_handle_down: None,
+            flaps_handle_index: None,
+            engine_combustion: None,
+            autopilot_master: None,
+            autothrottle_arm: None,
+            beacon_light: None,
+            aircraft_values: Default::default(),
+            channel_quality: Default::default(),
+            sim_timing: fd_core::telemetry::SimTiming::default(),
+        }));
+        MissionContext {
+            snapshot: snap,
+            distance_to_destination_nm: dist,
+            bearing_to_waypoint_deg: 0.0,
+        }
     }
 }
