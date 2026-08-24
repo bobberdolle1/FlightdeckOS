@@ -121,7 +121,7 @@ fn action_ignored_fault_is_detected_as_expected_failure() {
 id = "action-ignored-negative"
 package = "../../aircraft/a32nx"
 flow = "before_start"
-expected_failure = true
+expected_failure = "action_failed"
 [origin]
 id = "UUEE"
 lat_deg = 55.972642
@@ -166,7 +166,7 @@ fn telemetry_freeze_prevents_completion_and_is_detected() {
     let spec = r#"
 [scenario]
 id = "telemetry-freeze-negative"
-expected_failure = true
+expected_failure = "tick_timeout"
 [origin]
 id = "UUEE"
 lat_deg = 55.972642
@@ -196,12 +196,102 @@ telemetry_freeze_until_tick = 1000000
         ScenarioResult::Passed,
         "freeze-induced non-completion must be DETECTED (timeout), not faked"
     );
+    // Trigger-gated inversion (spec §3A): the PASS is because the fired
+    // trigger (tick timeout) matches the expected one — not because "any
+    // failure" happened. assertions_failed stays empty on the matched path.
+    assert!(
+        report.assertions_failed.is_empty(),
+        "matched expected trigger must not add assertions: {:?}",
+        report.assertions_failed
+    );
+    assert_eq!(report.final_phase, "Preflight");
+}
+
+#[test]
+fn wrong_expected_trigger_fails_the_scenario() {
+    // The freeze scenario fires `tick_timeout`; expecting `mission_failed`
+    // must NOT pass — an unrelated trigger can never satisfy the
+    // expectation (spec §3A).
+    let spec = r#"
+[scenario]
+id = "wrong-trigger-negative"
+expected_failure = "mission_failed"
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+[mission]
+cruise_altitude_ft = 30000.0
+[simulation]
+dt_ms = 100
+max_sim_seconds = 120
+
+[faults]
+telemetry_freeze_until_tick = 1000000
+"#;
+    let path = write_scenario(spec);
+    let report = run_scenario(&path).unwrap();
+    assert!(
+        matches!(report.result, ScenarioResult::Failed { .. }),
+        "unrelated trigger must not satisfy the expectation: {:?}",
+        report.result
+    );
     assert!(
         report
             .assertions_failed
             .iter()
-            .any(|a| a.contains("tick budget")),
-        "the recorded failure must name the tick-budget timeout: {:?}",
+            .any(|a| a.contains("unrelated trigger")),
+        "reason must name the unrelated trigger: {:?}",
         report.assertions_failed
+    );
+}
+
+#[test]
+fn disconnect_fault_blocks_poll_boundary_and_recovers() {
+    // The disconnect fault must act at the REAL adapter boundary: the
+    // runtime receives NotConnected while the window is active, and the
+    // scenario recovers once it elapses (spec §3B). The world keeps
+    // evolving; after recovery the mission completes nominally.
+    let spec = r#"
+[scenario]
+id = "disconnect-recovery"
+[origin]
+id = "UUEE"
+lat_deg = 55.972642
+lon_deg = 37.414589
+elevation_ft = 622.0
+[destination]
+id = "ULLI"
+lat_deg = 59.800278
+lon_deg = 30.2625
+elevation_ft = 79.0
+[initial_conditions]
+heading_deg = 330.0
+engines_running = true
+[mission]
+cruise_altitude_ft = 30000.0
+[simulation]
+dt_ms = 100
+max_sim_seconds = 7200
+
+[faults]
+disconnect_until_tick = 50
+"#;
+    let path = write_scenario(spec);
+    let report = run_scenario(&path).unwrap();
+    assert_eq!(
+        report.result,
+        ScenarioResult::Passed,
+        "disconnect window must not derail the mission: {:?}",
+        report.result
     );
 }

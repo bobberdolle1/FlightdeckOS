@@ -86,6 +86,15 @@ impl VirtualSimulator {
         self.faults = faults.normalized();
     }
 
+    /// Connectivity as seen through the fault injection: a deterministic
+    /// disconnect window (`disconnect_until_tick`) makes the adapter
+    /// boundary report disconnected for the first N advance attempts.
+    /// This is the REAL adapter boundary (poll/execute/is_connected), not
+    /// a test-only shim.
+    pub fn is_connected(&self) -> bool {
+        self.fault_ticks >= self.faults.disconnect_until_tick
+    }
+
     /// Read-only access to the active fault configuration.
     pub const fn faults(&self) -> &FaultConfig {
         &self.faults

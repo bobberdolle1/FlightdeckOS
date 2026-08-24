@@ -69,11 +69,36 @@ pub struct ScenarioHeader {
     /// Optional flow id to start from the package.
     #[serde(default)]
     pub flow: Option<String>,
-    /// Negative scenario: the run PASSES only when the mission FAILS
-    /// (or times out) as expected. A nominal PASS is reported as a
-    /// scenario failure ("expected failure did not occur").
+    /// Negative scenario: the run PASSES only when the SPECIFIC expected
+    /// trigger fires. A nominal PASS, a different trigger, or no failure
+    /// at all is a scenario failure — an unrelated error can never
+    /// satisfy the expectation.
     #[serde(default)]
-    pub expected_failure: bool,
+    pub expected_failure: Option<ExpectedTrigger>,
+}
+
+/// Which deterministic failure trigger a negative scenario expects
+/// (spec §3A: precise expectation, not "any failure means success").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedTrigger {
+    /// Mission controller reached `Failed`.
+    MissionFailed,
+    /// Tick budget expired before the mission completed.
+    TickTimeout,
+    /// One or more dispatched actions failed post-condition verification.
+    ActionFailed,
+}
+
+impl ExpectedTrigger {
+    /// Human-readable name used in report reasons.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissionFailed => "mission_failed",
+            Self::TickTimeout => "tick_timeout",
+            Self::ActionFailed => "action_failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

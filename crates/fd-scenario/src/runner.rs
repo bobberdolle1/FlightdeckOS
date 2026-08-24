@@ -35,9 +35,12 @@ impl SimulatorAdapter for VirtualAdapter {
     }
     fn disconnect(&mut self) {}
     fn is_connected(&self) -> bool {
-        true
+        self.world.borrow().is_connected()
     }
     fn poll(&mut self) -> Result<Vec<TelemetrySnapshot>, fd_core::adapter::AdapterError> {
+        if !self.world.borrow().is_connected() {
+            return Err(fd_core::adapter::AdapterError::NotConnected);
+        }
         Ok(vec![self.world.borrow().snapshot()])
     }
     fn capability(&self, action: CockpitAction) -> fd_core::adapter::Capability {
@@ -154,9 +157,17 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
         world.borrow_mut().advance_tick();
         ticks += 1;
 
-        runtime
-            .tick(EventSource::Simulator)
-            .map_err(|e| e.to_string())?;
+        match runtime.tick(EventSource::Simulator) {
+            Ok(_) => {}
+            // Deterministic disconnect window: the runtime gets no telemetry
+            // this tick, but the world keeps evolving and the scenario keeps
+            // running — recovery is exercised through the production
+            // adapter boundary, not special-cased.
+            Err(fd_runtime::RuntimeError::Adapter(
+                fd_core::adapter::AdapterError::NotConnected,
+            )) => {}
+            Err(e) => return Err(e.to_string()),
+        }
 
         let snapshot_now: TelemetrySnapshot = world.borrow().snapshot();
         let phase_label = format!("{:?}", mission.phase());
@@ -286,47 +297,76 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
     // Scenario verdict (spec §40): a nominal scenario PASSES only when the
     // mission reached Completed. Mission Failed, or the tick budget
     // exhausting before completion, is a FAILED scenario — never a silent
-    // false success. `expected_failure` inverts this for negative
-    // scenarios: the run passes when the failure was correctly DETECTED.
+    // false success. A negative scenario (spec §3A) passes ONLY when the
+    // SPECIFIC expected trigger fired: an unrelated failure mode or a
+    // nominal pass can never satisfy the expectation.
     let mission_failed = matches!(mission.phase(), fd_mission::MissionPhase::Failed);
     let timed_out = !matches!(mission.phase(), fd_mission::MissionPhase::Completed);
+    let actions_failed = autonomy.actions_failed > 0;
     let mut assertions_failed: Vec<String> = Vec::new();
-    if autonomy.actions_failed > 0 {
+    if actions_failed {
         assertions_failed.push(format!(
             "{} dispatched action(s) failed post-condition verification",
             autonomy.actions_failed
         ));
     }
-    let nominal_failure = mission_failed || timed_out || autonomy.actions_failed > 0;
-    let mut result = if nominal_failure {
-        let reason = if mission_failed {
-            assertions_failed.push(format!("mission failed in phase {:?}", mission.phase()));
-            format!("mission failed in phase {:?}", mission.phase())
-        } else {
-            assertions_failed.push(format!(
-                "mission did not complete within the tick budget (phase {:?})",
-                mission.phase()
-            ));
-            format!(
-                "mission did not complete within the tick budget (phase {:?})",
-                mission.phase()
-            )
-        };
-        ScenarioResult::Failed { reason }
+    // The trigger that actually fired (priority: mission failure, then
+    // timeout, then action failures — at most one is reported).
+    let fired_trigger = if mission_failed {
+        Some(crate::spec::ExpectedTrigger::MissionFailed)
+    } else if timed_out {
+        Some(crate::spec::ExpectedTrigger::TickTimeout)
+    } else if actions_failed {
+        Some(crate::spec::ExpectedTrigger::ActionFailed)
     } else {
-        ScenarioResult::Passed
+        None
     };
-    if spec.scenario.expected_failure {
-        result = if nominal_failure {
-            ScenarioResult::Passed
-        } else {
-            assertions_failed
-                .push("expected failure did not occur: mission completed nominally".into());
-            ScenarioResult::Failed {
-                reason: "expected failure did not occur: mission completed nominally".into(),
-            }
-        };
-    }
+    let result = match (spec.scenario.expected_failure, fired_trigger) {
+        // Nominal scenario, nominal pass.
+        (None, None) => ScenarioResult::Passed,
+        // Nominal scenario, something failed: report the trigger.
+        (None, Some(t)) => {
+            let reason = match t {
+                crate::spec::ExpectedTrigger::MissionFailed => {
+                    assertions_failed
+                        .push(format!("mission failed in phase {:?}", mission.phase()));
+                    format!("mission failed in phase {:?}", mission.phase())
+                }
+                crate::spec::ExpectedTrigger::TickTimeout => {
+                    assertions_failed.push(format!(
+                        "mission did not complete within the tick budget (phase {:?})",
+                        mission.phase()
+                    ));
+                    format!(
+                        "mission did not complete within the tick budget (phase {:?})",
+                        mission.phase()
+                    )
+                }
+                crate::spec::ExpectedTrigger::ActionFailed => {
+                    "dispatched action(s) failed post-condition verification".to_string()
+                }
+            };
+            ScenarioResult::Failed { reason }
+        }
+        // Negative scenario: pass ONLY on the exact expected trigger.
+        (Some(expected), Some(fired)) if fired == expected => ScenarioResult::Passed,
+        // Negative scenario: expected trigger did not fire...
+        (Some(expected), fired) => {
+            let reason = match fired {
+                Some(fired) => format!(
+                    "expected trigger `{}` did not fire: unrelated trigger `{}` fired instead",
+                    expected.as_str(),
+                    fired.as_str()
+                ),
+                None => format!(
+                    "expected trigger `{}` did not fire: mission completed nominally",
+                    expected.as_str()
+                ),
+            };
+            assertions_failed.push(reason.clone());
+            ScenarioResult::Failed { reason }
+        }
+    };
     let landing_summary = LandingSummary {
         touchdown_occurred: landing_report.timestamp_ms.is_some(),
         touchdown_vertical_speed_fpm: landing_report.touchdown_vertical_speed_fpm,
