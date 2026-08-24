@@ -261,6 +261,12 @@ impl<W: TraceSink> Runtime<W> {
         self.executor.pending_count()
     }
 
+    /// Drain terminal action statuses (Verified/Failed/Rejected/TimedOut)
+    /// recorded since the last call. Diagnostics surface for smokes.
+    pub fn take_completed_actions(&mut self) -> Vec<(fd_core::actions::ActionId, ActionStatus)> {
+        self.executor.take_completed()
+    }
+
     /// Most recent snapshot (for callers/tests).
     pub fn last_snapshot(&self) -> Option<&TelemetrySnapshot> {
         self.last.as_ref()

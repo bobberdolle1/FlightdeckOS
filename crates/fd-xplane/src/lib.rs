@@ -16,10 +16,11 @@
 
 pub mod adapter;
 pub mod client;
+pub mod guard;
 pub mod protocol;
 pub mod refs;
 pub mod webapi;
 
-pub use adapter::{XPlaneAdapter, XPlaneConfig};
+pub use adapter::{BEACON_OFF_COMMAND, BEACON_ON_COMMAND, XPlaneAdapter, XPlaneConfig};
 pub use client::XPlaneUdpClient;
 pub use refs::DataRefId;

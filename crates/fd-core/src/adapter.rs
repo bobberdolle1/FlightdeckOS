@@ -53,6 +53,10 @@ pub enum AdapterError {
     BindingUnavailable(CockpitAction),
     #[error("action not supported by this adapter")]
     UnsupportedAction,
+    #[error("live writes are disabled (use the explicit arm path)")]
+    WritesDisabled,
+    #[error("current state unknown — refusing blind write for {0:?}")]
+    StateUnknown(CockpitAction),
     #[error("adapter poll produced no data")]
     PollTimeout,
 }

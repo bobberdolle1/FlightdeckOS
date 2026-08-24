@@ -28,6 +28,9 @@ pub enum DataRefId {
     /// Radio-altimeter indicated height, feet (pilot side). Preferred AGL
     /// source over geometric `y_agl` once airborne.
     RadioAltitudeFt,
+    /// Beacon light switch state (0/1). VERIFICATION source for the
+    /// SetBeacon action: independent observation of aircraft state.
+    BeaconOn,
 }
 
 impl DataRefId {
@@ -36,7 +39,7 @@ impl DataRefId {
         self as i32
     }
 
-    pub const ALL: [(DataRefId, &'static str); 17] = [
+    pub const ALL: [(DataRefId, &'static str); 18] = [
         (DataRefId::Latitude, "sim/flightmodel/position/latitude"),
         (DataRefId::Longitude, "sim/flightmodel/position/longitude"),
         (DataRefId::ElevationM, "sim/flightmodel/position/elevation"),
@@ -81,6 +84,7 @@ impl DataRefId {
             DataRefId::RadioAltitudeFt,
             "sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot",
         ),
+        (DataRefId::BeaconOn, "sim/cockpit2/switches/beacon_on"),
     ];
 
     pub fn path(self) -> &'static str {
@@ -143,7 +147,7 @@ mod tests {
         assert_eq!(ids.len(), DataRefId::ALL.len());
         assert_eq!(
             DataRefId::ALL.len(),
-            17,
+            18,
             "whitelist is closed; extend deliberately"
         );
     }

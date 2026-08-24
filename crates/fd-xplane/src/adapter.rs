@@ -23,7 +23,14 @@ use fd_core::units::{
 };
 
 use crate::client::XPlaneUdpClient;
+use crate::guard::LiveWriteGuard;
 use crate::refs::{Command, DataRefId, WriteRef};
+use crate::webapi::{DEFAULT_BASE_URL, HttpTransport, WebApiClient};
+
+/// Live command bindings for the first safe action (spec §9-12): commands
+/// for the mechanism, the UDP dataref for independent verification.
+pub const BEACON_ON_COMMAND: &str = "sim/lights/beacon_lights_on";
+pub const BEACON_OFF_COMMAND: &str = "sim/lights/beacon_lights_off";
 
 const M_TO_FT: f64 = 3.280_839_895;
 const MS_TO_KT: f64 = 1.943_844_492;
@@ -35,6 +42,11 @@ pub struct XPlaneConfig {
     pub port: u16,
     /// Dataref stream frequency in Hz (X-Plane default UI is 4-30).
     pub subscribe_hz: i32,
+    /// Local Web API base (loopback only, spec §30).
+    pub web_api_base: String,
+    /// Arm the live-write guard at construction (CLI `--allow-write`).
+    /// Default DISABLED: telemetry/shadow never write (spec §14).
+    pub allow_writes: bool,
 }
 
 impl Default for XPlaneConfig {
@@ -43,6 +55,8 @@ impl Default for XPlaneConfig {
             host: "127.0.0.1".into(),
             port: 49000,
             subscribe_hz: 4,
+            web_api_base: DEFAULT_BASE_URL.into(),
+            allow_writes: false,
         }
     }
 }
@@ -56,6 +70,10 @@ pub struct XPlaneAdapter {
     identity: AircraftIdentity,
     /// Last rejected control-target write (non-finite input / send error).
     last_control_error: Option<String>,
+    /// Local Web API client (command activation). Session-scoped ids.
+    web: Option<WebApiClient<HttpTransport>>,
+    /// Live-write inhibit (spec §14): default DISABLED.
+    write_guard: std::sync::Arc<LiveWriteGuard>,
     /// Number of poll cycles that observed a disconnected transport.
     disconnects: u64,
     last_poll_duration: Option<Duration>,
@@ -82,13 +100,33 @@ impl XPlaneAdapter {
         client
             .start(cfg.subscribe_hz, &refs)
             .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
+        let web = WebApiClient::new(
+            HttpTransport::new(&cfg.web_api_base)
+                .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?,
+        );
+        let write_guard = std::sync::Arc::new(LiveWriteGuard::disabled());
+        if cfg.allow_writes {
+            write_guard.arm();
+        }
         Ok(Self {
             client,
             identity,
             last_control_error: None,
+            web: Some(web),
+            write_guard,
             disconnects: 0,
             last_poll_duration: None,
         })
+    }
+
+    /// The live-write guard handle (CLI arm/disarm surface).
+    pub fn write_guard(&self) -> std::sync::Arc<LiveWriteGuard> {
+        std::sync::Arc::clone(&self.write_guard)
+    }
+
+    /// Current beacon state as observed over UDP telemetry (None = unknown).
+    pub fn beacon_state(&self) -> Option<bool> {
+        self.value(DataRefId::BeaconOn).map(|v| v > 0.5)
     }
 
     /// The aircraft identity this adapter was constructed with.
@@ -206,6 +244,7 @@ impl XPlaneAdapter {
         s.pitch = self.value(DataRefId::PitchDeg).map(AngleDeg::new);
         s.bank = self.value(DataRefId::BankDeg).map(AngleDeg::new);
         s.on_ground = self.value(DataRefId::OnGroundWheel0).map(|w| w > 0.5);
+        s.beacon_light = self.value(DataRefId::BeaconOn).map(|v| v > 0.5);
         s.gear_handle_down = self.value(DataRefId::GearDeploy0).map(|d| d > 0.5);
         s.autopilot_master = Some(
             self.value(DataRefId::ApHeadingStatus).unwrap_or(0.0) >= 2.0
@@ -287,18 +326,72 @@ impl SimulatorAdapter for XPlaneAdapter {
         out
     }
 
-    fn capability(&self, _action: CockpitAction) -> Capability {
-        // No discrete cockpit actions are allowlisted in this slice; the
-        // live control path is FlightControlTargets (autopilot targets).
-        if self.client.connected() {
-            Capability::Unsupported
-        } else {
-            Capability::Unavailable
+    fn capability(&self, action: CockpitAction) -> Capability {
+        match action {
+            // First safe action (spec §10): beacon via live Web API
+            // commands, verified through independent UDP telemetry.
+            CockpitAction::SetBeacon(_) => {
+                if self.client.connected() {
+                    Capability::Supported
+                } else {
+                    Capability::Unavailable
+                }
+            }
+            CockpitAction::SetNavLogo(_) => {
+                if self.client.connected() {
+                    Capability::Unsupported
+                } else {
+                    Capability::Unavailable
+                }
+            }
         }
     }
 
-    fn execute(&mut self, _action: CockpitAction) -> Result<(), AdapterError> {
-        Err(AdapterError::UnsupportedAction)
+    fn execute(&mut self, action: CockpitAction) -> Result<(), AdapterError> {
+        match action {
+            CockpitAction::SetBeacon(target) => self.execute_beacon(target),
+            CockpitAction::SetNavLogo(_) => Err(AdapterError::UnsupportedAction),
+        }
+    }
+}
+
+impl XPlaneAdapter {
+    /// Dispatch the beacon command through the Local Web API (spec §12/15):
+    /// guard → current-state precondition → no-op when already satisfied →
+    /// typed command activation. Success here is DISPATCH, never Verified —
+    /// verification happens in the runtime against fresh UDP telemetry.
+    fn execute_beacon(
+        &mut self,
+        target: fd_core::actions::SwitchPosition,
+    ) -> Result<(), AdapterError> {
+        use fd_core::actions::SwitchPosition;
+        // 1) Live-write inhibit (default disabled, spec §14).
+        self.write_guard.ensure_armed()?;
+        // 2) Current-state precondition: never blind-toggle (spec §12).
+        let current = self.beacon_state();
+        let target_on = target == SwitchPosition::On;
+        match current {
+            None => return Err(AdapterError::StateUnknown(CockpitAction::SetBeacon(target))),
+            Some(on) if on == target_on => {
+                // Already satisfied: no unnecessary command (spec §33).
+                return Ok(());
+            }
+            _ => {}
+        }
+        // 3) Typed command activation through the session-scoped client.
+        let name = if target_on {
+            BEACON_ON_COMMAND
+        } else {
+            BEACON_OFF_COMMAND
+        };
+        match self.web.as_mut() {
+            Some(web) => web
+                .activate_command(name)
+                .map_err(|e| AdapterError::WriteFailed(e.to_string())),
+            None => Err(AdapterError::WriteFailed(
+                "web api client unavailable".into(),
+            )),
+        }
     }
 }
 

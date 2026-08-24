@@ -82,6 +82,13 @@ enum Command {
         /// strings; recorded with UserProvided provenance, never trusted).
         #[arg(long)]
         aircraft_icao: Option<String>,
+        /// ARM live writes for this process (spec §14: default DISABLED).
+        #[arg(long)]
+        allow_write: bool,
+        /// Dispatch the first safe action: beacon on|off (requires
+        /// --allow-write). Verified only by fresh observed state.
+        #[arg(long)]
+        beacon: Option<String>,
     },
     /// Live MSFS session via SimConnect (Windows only).
     Live {
@@ -133,14 +140,18 @@ fn main() -> anyhow::Result<()> {
             set_vs_fpm,
             wait_first_secs,
             aircraft_icao,
-        } => run_xplane_live(
+            allow_write,
+            beacon,
+        } => run_xplane_live(XplaneSmokeOpts {
             port,
             monitor_secs,
             set_heading_true,
             set_vs_fpm,
             wait_first_secs,
             aircraft_icao,
-        ),
+            allow_write,
+            beacon,
+        }),
         Command::Replay {
             fixture,
             out,
@@ -633,24 +644,51 @@ fn run_openairac(url: &str, events: bool, identity: Option<&str>) -> anyhow::Res
 /// SIMULATOR_DISCONNECTED and keeps FlightdeckOS alive, retrying the
 /// subscription (Task 4 §7/§13/§16). No virtual fallback exists on this
 /// path.
-fn run_xplane_live(
+const BEACON_ON_CMD: &str = fd_xplane::BEACON_ON_COMMAND;
+const BEACON_OFF_CMD: &str = fd_xplane::BEACON_OFF_COMMAND;
+
+/// Options for the live X-Plane smoke (grouped to keep the signature sane).
+struct XplaneSmokeOpts {
     port: u16,
     monitor_secs: u64,
     set_heading_true: Option<f64>,
     set_vs_fpm: Option<f64>,
     wait_first_secs: u64,
     aircraft_icao: Option<String>,
-) -> anyhow::Result<()> {
+    allow_write: bool,
+    beacon: Option<String>,
+}
+
+fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
+    let XplaneSmokeOpts {
+        port,
+        monitor_secs,
+        set_heading_true,
+        set_vs_fpm,
+        wait_first_secs,
+        aircraft_icao,
+        allow_write,
+        beacon,
+    } = opts;
     use fd_core::adapter::{FlightControlTargets, SimulatorAdapter};
     use fd_core::capability::{CapabilityReport, CapabilityStatus, EvidenceSource};
     use fd_core::identity::AircraftIdentity;
     use fd_xplane::{XPlaneAdapter, XPlaneConfig};
+
+    // Spec §14: writes stay disabled unless explicitly armed THIS process.
+    if beacon.is_some() && !allow_write {
+        return Err(anyhow::anyhow!(
+            "--beacon requires --allow-write (live writes are disabled by default)"
+        ));
+    }
 
     println!("XPLANE LIVE SMOKE (native UDP transport)");
     let cfg = XPlaneConfig {
         host: "127.0.0.1".into(),
         port,
         subscribe_hz: 4,
+        allow_writes: allow_write,
+        ..XPlaneConfig::default()
     };
     let identity = match aircraft_icao {
         Some(icao) => AircraftIdentity::user_provided(Some(icao)),
@@ -668,6 +706,14 @@ fn run_xplane_live(
     adapter
         .connect()
         .map_err(|e| anyhow::anyhow!("connect failed: {e}"))?;
+    println!(
+        "WRITE_GUARD: {}",
+        if adapter.write_guard().is_armed() {
+            "ARMED (live writes enabled)"
+        } else {
+            "DISABLED (live writes inhibited)"
+        }
+    );
     println!("CONNECTED");
     println!(
         "TRANSPORT_CONNECTED: udp rx {} pkts so far",
@@ -712,6 +758,78 @@ fn run_xplane_live(
             e.status.as_str(),
             e.evidence.as_str()
         );
+    }
+
+    // ---- First safe action (spec §15): beacon through the full runtime
+    // action pipeline — guard -> catalog -> precondition -> dispatch ->
+    // fresh observed post-condition -> Verified. HTTP/command success is
+    // NOT Verified; only fresh telemetry is evidence.
+    if let Some(beacon_arg) = beacon.as_deref() {
+        let target = match beacon_arg {
+            "on" => fd_core::actions::SwitchPosition::On,
+            "off" => fd_core::actions::SwitchPosition::Off,
+            other => return Err(anyhow::anyhow!("--beacon expects on|off, got {other}")),
+        };
+        let initial = adapter.beacon_state();
+        println!(
+            "ACTION_PRECONDITION: beacon current={:?} target={:?} command_on={BEACON_ON_CMD} command_off={BEACON_OFF_CMD}",
+            initial, target
+        );
+        let trace_path = std::path::PathBuf::from("traces/live_beacon_action.jsonl");
+        let _ = std::fs::create_dir_all("traces");
+        let trace = fd_runtime::TraceWriter::create(&trace_path)
+            .map_err(|e| anyhow::anyhow!("action trace create failed: {e}"))?;
+        let mut rt = fd_runtime::Runtime::new(
+            Box::new(adapter),
+            trace,
+            fd_runtime::SessionId(1),
+            a32nx_default_catalog(),
+            fd_runtime::DeadlineTicks(20),
+        );
+        rt.start()
+            .map_err(|e| anyhow::anyhow!("runtime start failed: {e}"))?;
+        rt.submit_action(
+            CockpitAction::SetBeacon(target),
+            fd_core::actions::Actor::User,
+            fd_core::telemetry::SimTimestamp::new(0),
+        )
+        .map_err(|e| anyhow::anyhow!("submit failed: {e}"))?;
+
+        let mut verified = false;
+        let mut failed = String::new();
+        use fd_core::actions::{ActionStatus, CockpitAction};
+        for tick in 0..30 {
+            match rt.tick(EventSource::Simulator) {
+                Ok(_) => {}
+                Err(e) => {
+                    failed = format!("runtime tick failed: {e}");
+                    break;
+                }
+            }
+            let completed = rt.take_completed_actions();
+            for (id, st) in &completed {
+                println!("[action t={tick}] id={id:?} status={st:?}");
+                match st {
+                    ActionStatus::Verified => verified = true,
+                    other => failed = format!("action terminal: {other:?}"),
+                }
+            }
+            if verified || !failed.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        if verified {
+            println!(
+                "ACTION_RESULT: VERIFIED (beacon {:?} confirmed by fresh telemetry)",
+                target
+            );
+        } else {
+            println!("ACTION_RESULT: NOT VERIFIED — {failed}");
+        }
+        rt.finish().ok();
+        println!("ACTION_TRACE: {}", trace_path.display());
+        return Ok(());
     }
 
     let mut last_heading_cmd: Option<(f64, std::time::Instant)> = None;
