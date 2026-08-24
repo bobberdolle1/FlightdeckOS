@@ -6,11 +6,15 @@
 pub mod client;
 pub mod context;
 pub mod error;
+pub mod store;
 pub mod types;
 
 pub use client::{DEFAULT_GATEWAY_URL, OpenAiracClient};
 pub use context::{CrewFlightContext, SourceOwnershipTable, SubsystemFreshness};
 pub use error::OpenAiracError;
+pub use store::{
+    AirportRecord, NavDataStore, REFERENCE_QUERY_INSTANT, RunwayRecord, WaypointRecord,
+};
 pub use types::{
     CompactFreshness, EXPECTED_COMPACT_SCHEMA, EXPECTED_SNAPSHOT_V2_SCHEMA, OpenAiracActiveLeg,
     OpenAiracAircraftProfile, OpenAiracAirportBrief, OpenAiracArrivalBrief,

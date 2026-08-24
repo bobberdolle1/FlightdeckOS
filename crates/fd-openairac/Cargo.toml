@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
 fd-core = { path = "../fd-core" }
 serde.workspace = true
 serde_json.workspace = true

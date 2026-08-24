@@ -7,6 +7,9 @@ pub enum OpenAiracError {
     #[error("OpenAIRAC gateway HTTP request failed: {0}")]
     HttpError(#[from] reqwest::Error),
 
+    #[error("OpenAIRAC world store error: {0}")]
+    StoreError(String),
+
     #[error("JSON deserialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
