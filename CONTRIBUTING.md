@@ -23,7 +23,8 @@ Every commit: `cargo fmt --check`, `cargo clippy --workspace --all-targets
 -- -D warnings`, `cargo test --workspace`, `git diff --check` — all green.
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the details.
 
-## License note
+## License
 
-The project currently has no LICENSE file. Do not submit contributions
-before licensing is resolved.
+Contributions are licensed under [Apache-2.0](LICENSE), like the rest of
+the project. By submitting a contribution you agree to license it under
+the same terms.

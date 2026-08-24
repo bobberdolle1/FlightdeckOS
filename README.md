@@ -1,5 +1,8 @@
 # FlightdeckOS
 
+[![CI](https://github.com/bobberdolle1/FlightdeckOS/actions/workflows/ci.yml/badge.svg)](https://github.com/bobberdolle1/FlightdeckOS/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Simulator-independent aviation runtime and experimental flight-automation
 platform: flight-data observation and recording, navigation context, aircraft
 capability discovery, deterministic procedures, safe cockpit actions — built
@@ -236,5 +239,6 @@ options. Live-write smoke actions on the `xplane` command require an explicit
 
 ## License
 
-No license has been defined yet (see LICENSE section in
-[docs/STATUS.md](docs/STATUS.md)). All rights reserved until one is chosen.
+FlightdeckOS is licensed under [Apache-2.0](LICENSE). Third-party runtime
+data (e.g. OpenAIRAC world datasets) remains under its own terms and is
+read in place, never redistributed here.

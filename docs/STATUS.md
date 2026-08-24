@@ -117,6 +117,6 @@ This document is the evidence-backed capability snapshot. Labels:
   limits, not certification criteria, not real FOQA policy.
 - **Runway selection** in the observatory is a development default (first
   runway with complete geometry), not wind/ATC-informed.
-- **License**: no LICENSE file exists yet. The project is All rights
-  reserved until one is defined. This must be resolved before soliciting
-  external contributions.
+- **License**: Apache-2.0 (project code). Third-party runtime datasets
+  (OpenAIRAC world store, MSFS/FlyByWire addon data) remain under their own
+  terms and are read in place, never redistributed from this repository.
