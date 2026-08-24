@@ -543,18 +543,6 @@ mod tests {
 #[cfg(test)]
 mod classification_tests {
     use super::*;
-    use crate::controller::MissionCommands;
-
-    fn entry(intended: MissionCommands, observed: ObservedApTargets) -> ShadowEntry {
-        ShadowEntry {
-            sample_seq: 0,
-            phase: MissionPhase::Cruise,
-            intended,
-            observed,
-            matches: [false; chan::COUNT],
-            divergences: Vec::new(),
-        }
-    }
 
     #[test]
     fn classification_is_four_way() {
