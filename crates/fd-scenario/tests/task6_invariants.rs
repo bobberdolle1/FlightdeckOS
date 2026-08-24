@@ -42,10 +42,9 @@ fn synthetic_flight() -> Vec<FdrSample> {
     let mut rec = Recorder::new();
     let mut out = Vec::new();
     let mut agl = 0.0f64;
-    let mut vs = 0.0f64;
     // Climb 0 -> 3000 ft at 1000 fpm.
     for seq in 0..60u64 {
-        vs = 1000.0;
+        let vs = 1000.0f64;
         agl += vs / 600.0; // per 100 ms tick
         out.push(sample(&mut rec, seq, seq * 100, agl, false, vs));
     }
@@ -55,7 +54,7 @@ fn synthetic_flight() -> Vec<FdrSample> {
     }
     // Descent at -700 fpm.
     for seq in 100..160u64 {
-        vs = -700.0;
+        let vs = -700.0f64;
         agl += vs / 600.0;
         out.push(sample(&mut rec, seq, seq * 100, agl.max(0.0), false, vs));
     }

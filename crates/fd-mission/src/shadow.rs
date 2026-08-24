@@ -1058,7 +1058,7 @@ mod shadow_v2_tests {
         let dist_before = 400.0;
         let bearing_before = 45.0;
         let alt_before = s.altitude_msl.map(|v| v.value());
-        let mut c = ctx(&s, dist_before);
+        let c = ctx(&s, dist_before);
         let observed = ObservedApTargets {
             altitude_ft: Some(33_000.0),
             ..ObservedApTargets::default()

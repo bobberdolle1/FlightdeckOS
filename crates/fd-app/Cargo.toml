@@ -6,6 +6,9 @@ license.workspace = true
 description = "FlightdeckOS application host: replay/live CLI"
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+fd-mission = { path = "../fd-mission" }
+fd-debrief = { path = "../fd-debrief" }
 fd-core = { path = "../fd-core" }
 fd-fdm = { path = "../fd-fdm" }
 serde_json = "1.0"

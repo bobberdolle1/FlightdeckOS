@@ -253,13 +253,16 @@ dependencies = [
  "fd-aircraft",
  "fd-core",
  "fd-crew",
+ "fd-debrief",
  "fd-fdm",
+ "fd-mission",
  "fd-openairac",
  "fd-runtime",
  "fd-scenario",
  "fd-simconnect",
  "fd-sop",
  "fd-xplane",
+ "rusqlite",
  "serde_json",
 ]
 

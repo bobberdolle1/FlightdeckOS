@@ -138,7 +138,13 @@ impl RouteMonitor {
                 let current = &self.waypoints[self.active_leg];
                 let d_next = distance_nm(lat_deg, lon_deg, next.lat_deg, next.lon_deg);
                 let d_current = distance_nm(lat_deg, lon_deg, current.lat_deg, current.lon_deg);
-                if d_next <= self.capture_radius_nm || d_next < d_current {
+                // The FINAL waypoint requires actual arrival (capture
+                // radius); intermediate waypoints also advance when passed
+                // abeam (nearer to the next than to the current — handles
+                // jump-past positions). Without this distinction a 2-point
+                // route would "complete" at its own midpoint.
+                let is_final = self.active_leg + 2 == self.waypoints.len();
+                if d_next <= self.capture_radius_nm || (!is_final && d_next < d_current) {
                     self.active_leg += 1;
                 } else {
                     break;
@@ -184,7 +190,7 @@ impl RouteMonitor {
 
         // Remaining: distance to active waypoint + all legs after it.
         let remaining_legs: f64 = self.leg_lengths_nm[leg + 1..].iter().sum();
-        let distance_remaining_nm = Some(distance_to_waypoint_nm.unwrap() + remaining_legs);
+        let distance_remaining_nm = distance_to_waypoint_nm.map(|d| d + remaining_legs);
 
         RouteObservation {
             active_leg: Some(leg),
@@ -366,10 +372,20 @@ mod tests {
         // At B: capture radius 2.5nm, B is within radius -> leg 1 active.
         let obs = m.update(0.0, 1.0);
         assert_eq!(obs.active_leg, Some(1));
-        // Far past C: route complete.
-        let obs = m.update(0.0, 5.0);
+        // Arrival WITHIN the capture radius of the final waypoint C
+        // completes the route. Jumping PAST the final waypoint without
+        // entering its radius does NOT (you never arrived).
+        let obs = m.update(0.0, 2.0);
         assert!(obs.route_complete);
         assert_eq!(obs.distance_remaining_nm, Some(0.0));
+        let mut m2 = RouteMonitor::new(&route());
+        let obs = m2.update(0.0, 1.0); // at B
+        assert_eq!(obs.active_leg, Some(1));
+        let obs = m2.update(0.0, 5.0); // 180nm past C: not arrived
+        assert!(
+            !obs.route_complete,
+            "overflying the destination is not arrival"
+        );
     }
 
     #[test]
@@ -381,13 +397,11 @@ mod tests {
 
     #[test]
     fn off_route_requires_sustained_deviation() {
-        let mut m = RouteMonitor::new(&route());
         let mut det = OffRouteDetector::new(OffRouteConfig::default());
         let mut event_seq = None;
-        // 6nm right of leg for 3 consecutive samples -> event on 3rd.
+        // ~9nm off-leg for 3 consecutive samples -> event on the 3rd.
         for seq in 0..3u64 {
-            m = RouteMonitor::new(&route()); // fresh monitor: no capture side effects
-            let obs = m.update(0.15, 0.5); // ~9nm north of leg
+            let obs = RouteMonitor::new(&route()).update(0.15, 0.5); // ~9nm off-leg
             if let Some(ev) = det.update(seq, &obs) {
                 event_seq = Some((seq, ev));
                 break;

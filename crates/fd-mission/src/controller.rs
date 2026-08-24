@@ -257,15 +257,21 @@ pub struct MissionController {
 }
 
 impl MissionController {
+    /// Current mission phase (read-only accessor for shadow/observe paths).
+    pub const fn phase(&self) -> MissionPhase {
+        self.phase
+    }
+
+    /// Mission parameters (read-only accessor).
+    pub const fn params(&self) -> &MissionParameters {
+        &self.params
+    }
+
     pub fn new(params: MissionParameters) -> Self {
         Self {
             params,
             phase: MissionPhase::Preflight,
         }
-    }
-
-    pub const fn phase(&self) -> MissionPhase {
-        self.phase
     }
 
     /// One controller pass. Emits guidance targets and may transition the

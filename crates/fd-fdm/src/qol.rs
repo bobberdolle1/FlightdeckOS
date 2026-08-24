@@ -430,7 +430,7 @@ mod tests {
 
         // Base analyze() NEVER reports runway metrics.
         let r_base = analyze(&samples);
-        assert_eq!(r_base.touchdown.is_some(), true);
+        assert!(r_base.touchdown.is_some());
         assert_eq!(r_base.centerline_offset_m, None);
         assert_eq!(r_base.distance_beyond_threshold_m, None);
         assert_eq!(r_base.remaining_runway_m, None);

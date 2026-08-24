@@ -193,7 +193,7 @@ impl Recorder {
                 fd_core::telemetry::SimState::Unknown => "unknown",
             }
             .to_string(),
-            position: snap.position.clone(),
+            position: snap.position,
             // Track is not (yet) a canonical snapshot channel; recorded as
             // unknown rather than derived from heading (ground track vs
             // heading differ under wind).
@@ -367,8 +367,7 @@ impl FlightRecording {
         let mut recording = Self::default();
         let mut saw_header = false;
         let lines: Vec<&str> = raw.lines().collect();
-        let mut iter = lines.iter().enumerate().peekable();
-        while let Some((idx, line)) = iter.next() {
+        for (idx, line) in lines.iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -703,9 +702,7 @@ mod tests {
     fn legacy_v1_pretty_json_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.json");
-        let legacy = format!(
-            "{{\"samples\":[{{\"seq\":0,\"timestamp\":{{\"ms\":5}},\"altitude_msl\":null,\"radio_altitude\":null,\"indicated_airspeed\":null,\"groundspeed\":null,\"vertical_speed\":null,\"heading_true\":null,\"pitch\":null,\"bank\":null,\"on_ground\":null,\"gear_down\":null,\"flaps_handle_index\":null,\"any_engine_running\":null,\"autopilot_master\":null,\"flight_phase\":\"Parked\",\"sim_state\":\"running\"}}],\"events\":[]}}"
-        );
+        let legacy = r#"{"samples":[{"seq":0,"timestamp":{"ms":5},"altitude_msl":null,"radio_altitude":null,"indicated_airspeed":null,"groundspeed":null,"vertical_speed":null,"heading_true":null,"pitch":null,"bank":null,"on_ground":null,"gear_down":null,"flaps_handle_index":null,"any_engine_running":null,"autopilot_master":null,"flight_phase":"Parked","sim_state":"running"}],"events":[]}"#;
         std::fs::write(&path, legacy).unwrap();
         let loaded = FlightRecording::load(&path).unwrap();
         assert_eq!(loaded.samples.len(), 1);
@@ -717,7 +714,6 @@ mod tests {
 
     #[test]
     fn recorder_carries_quality_and_timing_v2_fields() {
-        use std::collections::BTreeMap;
         let mut rec = Recorder::new();
         let mut s = TelemetrySnapshot::empty(SimTimestamp::new(9));
         s.sim_timing.sim_rate = Some(2.0);

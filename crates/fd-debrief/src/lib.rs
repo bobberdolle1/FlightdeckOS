@@ -151,7 +151,7 @@ pub fn data_quality_summary(
     let mut non_fresh: BTreeMap<u16, u64> = BTreeMap::new();
     let mut ever_fresh: BTreeMap<u16, bool> = BTreeMap::new();
     for map in per_sample_non_fresh {
-        for (&ch, _q) in &map {
+        for (&ch, _) in map.iter() {
             *non_fresh.entry(ch).or_insert(0) += 1;
             ever_fresh.entry(ch).or_insert(false);
         }

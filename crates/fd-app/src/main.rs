@@ -120,6 +120,40 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
+    /// LIVE FLIGHT OBSERVATORY: zero-write observation of a real flight
+    /// (Task 6 §56). Connect, identify, record, analyze, debrief.
+    Observe {
+        /// X-Plane UDP command port (default 49000).
+        #[arg(long, default_value_t = 49000)]
+        port: u16,
+        /// Seconds to observe (0 = until Ctrl+C).
+        #[arg(long, default_value_t = 60)]
+        monitor_secs: u64,
+        /// Seconds to wait for the FIRST telemetry packet.
+        #[arg(long, default_value_t = 240)]
+        wait_first_secs: u64,
+        /// Operator-claimed aircraft ICAO (UserProvided provenance).
+        #[arg(long)]
+        aircraft_icao: Option<String>,
+        /// FDR V2 output (streamed JSONL).
+        #[arg(long)]
+        fdr_out: std::path::PathBuf,
+        /// Structured debrief JSON output.
+        #[arg(long)]
+        debrief_out: Option<std::path::PathBuf>,
+        /// Declared origin ICAO (operator evidence).
+        #[arg(long)]
+        origin_icao: Option<String>,
+        /// Declared destination ICAO (operator evidence).
+        #[arg(long)]
+        destination_icao: Option<String>,
+        /// OpenAIRAC world store path (read-only) for airport/runway context.
+        #[arg(long)]
+        world_store: Option<std::path::PathBuf>,
+        /// Declared cruise altitude — ARMS the zero-write Mission Shadow.
+        #[arg(long)]
+        cruise_altitude_ft: Option<f64>,
+    },
     /// Query OpenAIRAC Gateway directly.
     Openairac {
         /// OpenAIRAC Gateway URL.
@@ -133,6 +167,8 @@ enum Command {
         identity: Option<String>,
     },
 }
+
+mod observe;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -157,6 +193,29 @@ fn main() -> anyhow::Result<()> {
             allow_write,
             beacon,
             fdr_out,
+        }),
+        Command::Observe {
+            port,
+            monitor_secs,
+            wait_first_secs,
+            aircraft_icao,
+            fdr_out,
+            debrief_out,
+            origin_icao,
+            destination_icao,
+            world_store,
+            cruise_altitude_ft,
+        } => observe::run_observe(observe::ObserveOpts {
+            port,
+            monitor_secs,
+            wait_first_secs,
+            aircraft_icao,
+            fdr_out,
+            debrief_out,
+            origin_icao,
+            destination_icao,
+            world_store,
+            cruise_altitude_ft,
         }),
         Command::Replay {
             fixture,
