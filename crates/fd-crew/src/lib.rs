@@ -8,6 +8,7 @@ pub mod provider;
 pub mod runtime;
 pub mod sop_binding;
 pub mod tools;
+pub mod view;
 
 pub use error::AiCrewError;
 pub use provider::{AiCrewPrompt, AiCrewResponse, AiModelProvider, DeterministicAiProvider};

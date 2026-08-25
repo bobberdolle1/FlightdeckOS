@@ -17,6 +17,7 @@ use fd_fdm::fdm::FdmAnalyzer;
 use fd_fdm::fdr::{FdrSessionMeta, FlightRecording, Recorder, StreamedRecorder};
 use fd_fdm::qoa::ApproachAnalyzer;
 use fd_fdm::session::{SessionEvidence, SessionTracker};
+use fd_fdm::summary::SessionSummarizer;
 
 fn identity() -> AircraftIdentity {
     AircraftIdentity {
@@ -115,6 +116,12 @@ fn live_fdr_produces_structured_debrief() {
     }
     let approach = qoa.finish();
 
+    let mut summarizer = SessionSummarizer::new();
+    for s in &recording.samples {
+        summarizer.push_sample(s);
+    }
+    let (summary, landing_window) = summarizer.finish();
+
     // 4. Debrief through the SAME builder the live verb uses.
     let debrief = build_debrief(BuildDebriefArgs {
         identity: identity(),
@@ -127,7 +134,9 @@ fn live_fdr_produces_structured_debrief() {
         route_usable: false,
         off_route_events: 0,
         route_complete: false,
-        samples: &recording.samples,
+        summary: &summary,
+        landing_window: &landing_window,
+        plan: None,
         fdm_events: 0,
         approach: &approach,
         runway: None, // EDDM runway geometry unresolved at the dataset pin: honest None

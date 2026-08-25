@@ -153,6 +153,12 @@ enum Command {
         /// Declared cruise altitude — ARMS the zero-write Mission Shadow.
         #[arg(long)]
         cruise_altitude_ft: Option<f64>,
+        /// FMS bridge port (0 disables FMS observation; default 57501).
+        #[arg(long, default_value_t = 57501)]
+        fms_bridge_port: u16,
+        /// Bounded crew-view JSON output (Task 7 §33-34).
+        #[arg(long)]
+        crew_view_out: Option<std::path::PathBuf>,
     },
     /// Query OpenAIRAC Gateway directly.
     Openairac {
@@ -205,6 +211,8 @@ fn main() -> anyhow::Result<()> {
             destination_icao,
             world_store,
             cruise_altitude_ft,
+            fms_bridge_port,
+            crew_view_out,
         } => observe::run_observe(observe::ObserveOpts {
             port,
             monitor_secs,
@@ -216,6 +224,8 @@ fn main() -> anyhow::Result<()> {
             destination_icao,
             world_store,
             cruise_altitude_ft,
+            fms_bridge_port,
+            crew_view_out,
         }),
         Command::Replay {
             fixture,

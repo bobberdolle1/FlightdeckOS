@@ -20,6 +20,9 @@ pub enum RouteSource {
     /// Planned/resolved from OpenAIRAC data. Provenance string identifies
     /// the dataset revision (e.g. `"world.openairac.sqlite@2026-08-20T19:15:00Z"`).
     OpenAirac { provenance: String },
+    /// Observed from the simulator's own FMS (Task 7 §26). Provenance
+    /// carries the transport + snapshot revision hash.
+    XPlaneFms { provenance: String },
     /// Operator-supplied (CLI/config).
     Operator,
     /// Deterministic scenario definition (headless tests).
@@ -33,6 +36,7 @@ impl RouteSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             RouteSource::OpenAirac { .. } => "openairac",
+            RouteSource::XPlaneFms { .. } => "xplane_fms",
             RouteSource::Operator => "operator",
             RouteSource::Scenario => "scenario",
             RouteSource::Unknown => "unknown",

@@ -8,6 +8,7 @@ use fd_fdm::fdm::FdmAnalyzer;
 use fd_fdm::fdr::FlightRecording;
 use fd_fdm::qoa::ApproachAnalyzer;
 use fd_fdm::session::{SessionEvidence, SessionTracker};
+use fd_fdm::summary::SessionSummarizer;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -57,7 +58,15 @@ fn main() -> anyhow::Result<()> {
         route_usable: false,
         off_route_events: 0,
         route_complete: false,
-        samples: &recording.samples,
+        summary: &{
+            let mut sum = SessionSummarizer::new();
+            for s in &recording.samples {
+                sum.push_sample(s);
+            }
+            sum.finish().0
+        },
+        landing_window: &recording.samples[recording.samples.len().saturating_sub(4096)..],
+        plan: None,
         fdm_events: recording.events.len() as u64,
         approach: &qoa.finish(),
         runway: None,

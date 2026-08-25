@@ -94,6 +94,16 @@ impl Default for SessionSummarizer {
 }
 
 impl SessionSummarizer {
+    /// Samples consumed so far.
+    pub fn sample_count(&self) -> u64 {
+        self.summary.sample_count
+    }
+
+    /// FDM events recorded so far.
+    pub fn fdm_events(&self) -> u64 {
+        self.summary.fdm_events
+    }
+
     pub fn new() -> Self {
         Self {
             summary: SessionSummary {
