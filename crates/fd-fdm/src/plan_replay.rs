@@ -266,9 +266,7 @@ mod tests {
         ));
         state.apply(&event(
             2,
-            FdrEventPayload::ProcedureContextChanged {
-                context: Some(ctx),
-            },
+            FdrEventPayload::ProcedureContextChanged { context: Some(ctx) },
         ));
         assert_eq!(state.procedure_phase, ProcedurePhase::Unknown);
     }
