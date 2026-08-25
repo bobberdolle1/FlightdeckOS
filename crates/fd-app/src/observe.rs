@@ -298,6 +298,7 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
                     timestamp: sample.timestamp,
                     kind: "fdm".into(),
                     detail: format!("{:?} measured={:.0}", ev.kind, ev.measured),
+                    payload: None,
                 })
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }

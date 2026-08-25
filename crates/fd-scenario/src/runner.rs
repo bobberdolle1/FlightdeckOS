@@ -181,6 +181,7 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
                 timestamp: sample.timestamp,
                 kind: "fdm".into(),
                 detail: format!("{:?} measured={:.0}", ev.kind, ev.measured),
+                payload: None,
             });
         }
 
@@ -226,6 +227,7 @@ pub fn run_scenario(spec_path: &std::path::Path) -> Result<ScenarioReport, Strin
                 timestamp: snapshot_now.timestamp,
                 kind: "mission".into(),
                 detail: format!("{:?} -> {:?}", pre_phase, mission.phase()),
+                payload: None,
             });
         }
 

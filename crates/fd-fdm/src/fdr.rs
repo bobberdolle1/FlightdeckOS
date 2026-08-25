@@ -57,13 +57,57 @@ pub struct FdrSample {
     pub channel_quality: std::collections::BTreeMap<u16, fd_core::telemetry::DataQuality>,
 }
 
-/// A non-sample event attached to the recording (phase change, action).
+/// A non-sample event attached to the recording (phase change, action,
+/// flight-plan observation/change — Task 7 §37).
+///
+/// `kind`/`detail` stay free-form for humans and tools that predate the
+/// typed payload; `payload` is the machine-readable, versioned
+/// representation replay consumes (§36). Old recordings without payloads
+/// load unchanged (`None`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FdrEvent {
     pub seq: u64,
     pub timestamp: SimTimestamp,
     pub kind: String,
     pub detail: String,
+    /// Typed payload (Task 7 §37). `None` for legacy events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<FdrEventPayload>,
+}
+
+/// Typed, versioned event payloads (Task 7 §36-37). Each variant carries
+/// everything replay needs to rebuild state WITHOUT querying the live
+/// simulator or filesystem (§38).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FdrEventPayload {
+    /// First observation of a simulator FMS snapshot.
+    FlightPlanObserved {
+        device: String,
+        revision_hash: u64,
+        primary_entries: usize,
+        approach_entries: Option<usize>,
+        destination_entry: Option<usize>,
+        destination_id: Option<String>,
+    },
+    /// Meaningful change of the primary plan (§12 classification).
+    FlightPlanChanged {
+        changes: Vec<fd_core::fplan::FlightPlanChange>,
+        revision_hash: u64,
+        primary_entries: usize,
+        destination_entry: Option<usize>,
+    },
+    /// Correlated procedure context changed (§15-16); `None` = no
+    /// deterministically supported context.
+    ProcedureContextChanged {
+        context: Option<fd_core::fplan::ProcedureContext>,
+    },
+    /// Resolved arrival/departure runway context changed (§27).
+    RunwayContextChanged {
+        airport: String,
+        runway_end: String,
+        evidence: String,
+    },
 }
 
 /// Session-level metadata attached to a recording (spec §19).
@@ -627,6 +671,7 @@ mod tests {
                 timestamp: SimTimestamp::new(2000),
                 kind: "phase".into(),
                 detail: "Climb->Cruise".into(),
+                payload: None,
             })
             .unwrap();
             w.finish().unwrap();

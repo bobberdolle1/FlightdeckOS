@@ -15,6 +15,7 @@
 //! reports a typed disconnect — it never substitutes virtual state.
 
 pub mod adapter;
+pub mod bridge;
 pub mod client;
 pub mod guard;
 pub mod protocol;

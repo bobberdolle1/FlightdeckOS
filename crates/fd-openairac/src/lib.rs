@@ -6,6 +6,7 @@
 pub mod client;
 pub mod context;
 pub mod error;
+pub mod match_nav;
 pub mod store;
 pub mod types;
 

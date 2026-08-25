@@ -137,6 +137,7 @@ fn real_recording_replays_with_identical_semantics() {
             timestamp: flight[160].timestamp,
             kind: "touchdown".into(),
             detail: "observed".into(),
+            payload: None,
         })
         .unwrap();
         w.finish().unwrap();

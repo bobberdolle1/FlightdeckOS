@@ -1,0 +1,11 @@
+[package]
+name = "fd-xplm-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal read-only X-Plane FMS bridge plugin (Task 7): reads flight-plan state via XPLM on the simulator thread and publishes bounded JSON snapshots over loopback TCP."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]

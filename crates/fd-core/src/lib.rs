@@ -16,6 +16,7 @@ pub mod adapter;
 pub mod capability;
 pub mod delta;
 pub mod events;
+pub mod fplan;
 pub mod geo;
 pub mod identity;
 pub mod phase;

@@ -1000,6 +1000,7 @@ fn run_xplane_live(opts: XplaneSmokeOpts) -> anyhow::Result<()> {
                         timestamp: sample.timestamp,
                         kind: "fdm".into(),
                         detail: format!("{:?} measured={:.0}", ev.kind, ev.measured),
+                        payload: None,
                     })
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }

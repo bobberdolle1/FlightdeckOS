@@ -15,6 +15,7 @@ members = [
     "crates/fd-openairac",
     "crates/fd-crew",
     "crates/fd-debrief",
+    "crates/fd-xplm-bridge",
 ]
 
 [workspace.package]

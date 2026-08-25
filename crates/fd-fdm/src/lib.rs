@@ -20,3 +20,4 @@ pub mod fdr;
 pub mod qoa;
 pub mod qol;
 pub mod session;
+pub mod summary;

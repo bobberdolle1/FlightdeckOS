@@ -62,6 +62,30 @@ pub struct WaypointRecord {
     pub is_enroute: bool,
 }
 
+/// A navaid record (VOR/NDB/DME/ILS) resolved from the world store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavaidRecord {
+    pub ident: String,
+    /// Raw OpenAIRAC navaid type code (passthrough; the matcher treats
+    /// navaids as one facility family).
+    pub navaid_type: String,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    /// Associated airport when the navaid is airport-referenced.
+    pub associated_airport: Option<String>,
+}
+
+/// One procedure (SID/STAR/APPROACH) of an airport: ordered fix idents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcedureRecord {
+    pub procedure_ident: String,
+    /// Raw OpenAIRAC procedure_kind code ('D' departure, 'E' STAR,
+    /// 'F' approach — verified against KLAX/UUEE data 2026-08).
+    pub kind_code: String,
+    /// Fixes in procedure sequence order.
+    pub fixes: Vec<String>,
+}
+
 /// Read-only OpenAIRAC world store handle.
 #[derive(Debug)]
 pub struct NavDataStore {
@@ -185,6 +209,123 @@ impl NavDataStore {
             }
         }
         Ok(best)
+    }
+
+    /// All waypoints with an exact identifier valid at `at`.
+    ///
+    /// Used by the OpenAIRAC correlation (Task 7 §14): identifier alone
+    /// is often ambiguous — every candidate carries its position so the
+    /// caller can disambiguate by geometry.
+    pub fn waypoints_by_ident(
+        &self,
+        ident: &str,
+        at: &str,
+    ) -> Result<Vec<WaypointRecord>, OpenAiracError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT ident, latitude_deg, longitude_deg, is_enroute
+                 FROM waypoints
+                 WHERE ident = ?1 AND valid_from <= ?2
+                   AND (valid_until IS NULL OR valid_until > ?2)",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([ident, at], |r| {
+                Ok(WaypointRecord {
+                    ident: r.get(0)?,
+                    lat_deg: r.get(1)?,
+                    lon_deg: r.get(2)?,
+                    is_enroute: r.get::<_, i64>(3)? != 0,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    /// All navaids (VOR/NDB/DME/ILS...) with an exact identifier valid
+    /// at `at`.
+    pub fn navaids_by_ident(
+        &self,
+        ident: &str,
+        at: &str,
+    ) -> Result<Vec<NavaidRecord>, OpenAiracError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT ident, navaid_type, latitude_deg, longitude_deg, associated_airport
+                 FROM navaids
+                 WHERE ident = ?1 AND valid_from <= ?2
+                   AND (valid_until IS NULL OR valid_until > ?2)",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([ident, at], |r| {
+                Ok(NavaidRecord {
+                    ident: r.get(0)?,
+                    navaid_type: r.get(1)?,
+                    lat_deg: r.get(2)?,
+                    lon_deg: r.get(3)?,
+                    associated_airport: r.get(4)?,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    /// All procedures of an airport valid at `at`, fixes in sequence
+    /// order. Used by the conservative procedure correlator (Task 7
+    /// §15-17). Procedures are looked up per airport — never assumed
+    /// from proximity.
+    pub fn procedures(
+        &self,
+        airport_ident: &str,
+        at: &str,
+    ) -> Result<Vec<ProcedureRecord>, OpenAiracError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT procedure_kind, procedure_ident, sequence_number, fix_ident
+                 FROM procedure_legs
+                 WHERE airport_ident = ?1 AND valid_from <= ?2
+                   AND (valid_until IS NULL OR valid_until > ?2)
+                 ORDER BY procedure_kind, procedure_ident, sequence_number",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([airport_ident, at], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut out: Vec<ProcedureRecord> = Vec::new();
+        for row in rows {
+            let (kind_code, proc_ident, _seq, fix) = row.map_err(sql_err)?;
+            match out
+                .last_mut()
+                .filter(|p| p.kind_code == kind_code && p.procedure_ident == proc_ident)
+            {
+                Some(proc) => proc.fixes.push(fix),
+                None => out.push(ProcedureRecord {
+                    procedure_ident: proc_ident,
+                    kind_code,
+                    fixes: vec![fix],
+                }),
+            }
+        }
+        Ok(out)
     }
 
     /// Waypoints inside a lat/lon box valid at `at` (bounded scan).
