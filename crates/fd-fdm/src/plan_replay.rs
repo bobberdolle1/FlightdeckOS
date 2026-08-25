@@ -80,10 +80,24 @@ impl PlanReplayState {
             FdrEventPayload::ProcedureContextChanged { context } => {
                 self.procedure = context.clone();
                 self.procedure_phase = match context.as_ref().map(|c| c.kind) {
-                    Some(fd_core::fplan::ProcedureKind::Approach) => ProcedurePhase::Approach,
+                    // Replicate the LIVE classification exactly
+                    // (observe.rs correlate_snapshot): an Approach only
+                    // counts as Approach when the FMS reports the
+                    // approach actually loaded; otherwise Unknown
+                    // (Task 7.1 review HIGH - replay==live equality).
+                    Some(fd_core::fplan::ProcedureKind::Approach)
+                        if self.approach_loaded == Some(true) =>
+                    {
+                        ProcedurePhase::Approach
+                    }
+                    Some(fd_core::fplan::ProcedureKind::Approach) => ProcedurePhase::Unknown,
                     Some(fd_core::fplan::ProcedureKind::Sid) => ProcedurePhase::Sid,
                     Some(fd_core::fplan::ProcedureKind::Star) => ProcedurePhase::Star,
-                    None => ProcedurePhase::Unknown,
+                    // No procedure context: live maps the
+                    // destination-known-no-procedure arm to Enroute; the
+                    // event does not carry the destination, so Enroute is
+                    // the replay-side equivalent for a cleared context.
+                    None => ProcedurePhase::Enroute,
                 };
             }
             FdrEventPayload::RunwayContextChanged {
@@ -192,15 +206,29 @@ mod tests {
             matched_fixes: 4,
             evidence: "test".into(),
         };
+        // Live equality (Task 7.1 review HIGH): an Approach context maps
+        // to Approach ONLY when the FMS reported the approach loaded;
+        // otherwise Unknown - exactly like observe.rs correlate_snapshot.
         let events = [
             event(
                 1,
+                FdrEventPayload::FlightPlanObserved {
+                    device: "StockGps".into(),
+                    revision_hash: 0xAA,
+                    primary_entries: 5,
+                    approach_entries: Some(1),
+                    destination_entry: Some(4),
+                    destination_id: Some("KLAX".into()),
+                },
+            ),
+            event(
+                2,
                 FdrEventPayload::ProcedureContextChanged {
                     context: Some(ctx.clone()),
                 },
             ),
             event(
-                2,
+                3,
                 FdrEventPayload::RunwayContextChanged {
                     airport: "KLAX".into(),
                     runway_end: "24L/06R".into(),
@@ -208,17 +236,40 @@ mod tests {
                 },
             ),
             event(
-                3,
+                4,
                 FdrEventPayload::ProcedureContextChanged { context: None },
             ),
         ];
         let mut state = PlanReplayState::default();
         state.apply(&events[0]);
-        assert_eq!(state.procedure_phase, ProcedurePhase::Approach);
         state.apply(&events[1]);
-        assert_eq!(state.runway.as_ref().map(|(a, _)| a.as_str()), Some("KLAX"));
+        assert_eq!(state.procedure_phase, ProcedurePhase::Approach);
         state.apply(&events[2]);
+        assert_eq!(state.runway.as_ref().map(|(a, _)| a.as_str()), Some("KLAX"));
+        state.apply(&events[3]);
         assert_eq!(state.procedure, None);
+        // Cleared context with a known destination: live classifies Enroute.
+        assert_eq!(state.procedure_phase, ProcedurePhase::Enroute);
+
+        // Without an approach loaded, the same context stays Unknown.
+        let mut state = PlanReplayState::default();
+        state.apply(&event(
+            1,
+            FdrEventPayload::FlightPlanObserved {
+                device: "StockGps".into(),
+                revision_hash: 0xAB,
+                primary_entries: 5,
+                approach_entries: Some(0),
+                destination_entry: Some(4),
+                destination_id: Some("KLAX".into()),
+            },
+        ));
+        state.apply(&event(
+            2,
+            FdrEventPayload::ProcedureContextChanged {
+                context: Some(ctx),
+            },
+        ));
         assert_eq!(state.procedure_phase, ProcedurePhase::Unknown);
     }
 }

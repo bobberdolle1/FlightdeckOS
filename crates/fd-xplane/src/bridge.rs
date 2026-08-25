@@ -186,6 +186,9 @@ fn map_snapshot(w: WireSnapshot) -> Result<FmsSnapshot, BridgeError> {
 pub struct FmsBridgeClient {
     reader: BufReader<TcpStream>,
     pub hello: BridgeHello,
+    /// Partial line bytes across polls: a read timeout must never
+    /// discard already-consumed bytes (Task 7.1 review MEDIUM).
+    pending: Vec<u8>,
 }
 
 impl FmsBridgeClient {
@@ -207,35 +210,66 @@ impl FmsBridgeClient {
                 hello.proto, hello.kind
             )));
         }
-        Ok(Self { reader, hello })
+        Ok(Self {
+            reader,
+            hello,
+            pending: Vec::new(),
+        })
     }
 
     /// Try to read one snapshot line. `Ok(None)` = nothing new within
     /// the read timeout. Any error means the connection is unusable and
     /// the caller should reconnect.
+    ///
+    /// Partial bytes persist across polls in `self.pending`: a read
+    /// timeout consumes whatever the socket delivered, and discarding
+    /// those bytes would desync the newline-framed stream (Task 7.1
+    /// review MEDIUM). The size cap trips as soon as the pending buffer
+    /// crosses MAX_LINE_BYTES, so a newline-less peer cannot grow the
+    /// buffer without bound.
     pub fn poll(&mut self) -> Result<Option<FmsSnapshot>, BridgeError> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
+        if self.pending.contains(&b'\n') {
+            return Self::complete_line(&mut self.pending);
+        }
+        match self.reader.read_until(b'\n', &mut self.pending) {
             Ok(0) => Err(BridgeError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "bridge closed",
             ))),
+            Ok(_) if self.pending.ends_with(&[b'\n'][..]) => Self::complete_line(&mut self.pending),
             Ok(_) => {
-                if line.len() > MAX_LINE_BYTES {
-                    return Err(BridgeError::Oversized(line.len()));
+                if self.pending.len() > MAX_LINE_BYTES {
+                    return Err(BridgeError::Oversized(self.pending.len()));
                 }
-                let wire: WireSnapshot = serde_json::from_str(line.trim())
-                    .map_err(|e| BridgeError::Protocol(format!("bad snapshot: {e}")))?;
-                map_snapshot(wire).map(Some)
+                Ok(None) // partial line retained for the next poll
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
+                if self.pending.len() > MAX_LINE_BYTES {
+                    return Err(BridgeError::Oversized(self.pending.len()));
+                }
                 Ok(None)
             }
             Err(e) => Err(BridgeError::Io(e)),
         }
+    }
+
+    /// Extract the first complete line from `pending`, leaving the rest.
+    fn complete_line(pending: &mut Vec<u8>) -> Result<Option<FmsSnapshot>, BridgeError> {
+        let Some(idx) = pending.iter().position(|&b| b == b'\n') else {
+            return Ok(None);
+        };
+        let line_bytes: Vec<u8> = pending.drain(..=idx).collect();
+        if line_bytes.len() > MAX_LINE_BYTES {
+            return Err(BridgeError::Oversized(line_bytes.len()));
+        }
+        let line = String::from_utf8(line_bytes)
+            .map_err(|e| BridgeError::Protocol(format!("non-utf8 snapshot line: {e}")))?;
+        let wire: WireSnapshot = serde_json::from_str(line.trim())
+            .map_err(|e| BridgeError::Protocol(format!("bad snapshot: {e}")))?;
+        map_snapshot(wire).map(Some)
     }
 }
 

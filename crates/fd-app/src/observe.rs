@@ -571,7 +571,7 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
     }
     let mut route_monitor = RouteMonitor::new(&route_state);
     let mut off_route = OffRouteDetector::new(OffRouteConfig::default());
-    let route_usable = route_state.is_usable();
+    let mut route_usable = route_state.is_usable();
 
     // Mission Shadow (zero-write): armed ONLY by an explicit mission
     // definition (§30: without a mission the shadow reports nothing).
@@ -652,7 +652,10 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
                 // Route rebuild only when the route actually changed.
                 if corr.route != route_state {
                     route_state = corr.route.clone();
-                    route_monitor = RouteMonitor::new(&route_state);
+                    // Recompute: a route that becomes usable only after
+                    // startup (late FMS bridge delivery) must enable
+                    // monitoring/shadow (Task 7.1 review HIGH).
+                    route_usable = route_state.is_usable();
                     off_route = OffRouteDetector::new(OffRouteConfig::default());
                     if let Some((_, _, _, follower)) = shadow.as_mut() {
                         *follower =

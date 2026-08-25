@@ -124,6 +124,10 @@ struct Shared {
 
 static STATE: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
 
+/// Publisher worker JoinHandle; joined in XPluginStop so the DLL is
+/// never unloaded under a live thread (Task 7.1 review BLOCKER).
+static WORKER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
 // ---------------------------------------------------------------------------
 // FMS reading (simulator thread only)
 // ---------------------------------------------------------------------------
@@ -326,12 +330,18 @@ fn worker_main(shared: Arc<Shared>, port: u16) {
         Ok(l) => l,
         Err(_) => {
             // Port unavailable: retry slowly; X-Plane must never crash
-            // because of the bridge (§8).
+            // because of the bridge (§8). Chunked sleeps keep XPluginStop's
+            // join bounded (~100 ms past the shutdown flag).
             loop {
                 if shared.shutdown.load(Ordering::Relaxed) {
                     return;
                 }
-                std::thread::sleep(Duration::from_secs(5));
+                for _ in 0..50 {
+                    if shared.shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
                 if let Ok(l) = TcpListener::bind(("127.0.0.1", port)) {
                     worker_accept(&shared, l);
                     return;
@@ -382,7 +392,12 @@ fn serve_client(shared: &Arc<Shared>, mut stream: TcpStream) {
         if shared.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        for _ in 0..25 {
+            if shared.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         ticks_since_send += 1;
         let current = shared.snapshot.lock().ok().and_then(|g| g.clone());
         let heartbeat_due = ticks_since_send >= 40; // 40 * 250ms = 10 s
@@ -485,9 +500,23 @@ pub extern "C" fn XPluginEnable() -> i32 {
         let worker_shared = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("fd-xplm-bridge".into())
-            .spawn(move || worker_main(worker_shared, port))
-            .is_ok();
-        i32::from(spawned)
+            .spawn(move || worker_main(worker_shared, port));
+        match spawned {
+            Ok(handle) => {
+                if let Ok(mut w) = WORKER.lock() {
+                    *w = Some(handle);
+                }
+                1
+            }
+            Err(_) => {
+                // Spawn failed after the flight loop was registered:
+                // unregister before reporting failure (Task 7.1 review).
+                unsafe {
+                    XPLMUnregisterFlightLoopCallback(flight_loop, std::ptr::null_mut());
+                }
+                0
+            }
+        }
     });
     r.unwrap_or(0)
 }
@@ -512,6 +541,16 @@ pub extern "C" fn XPluginDisable() {
 pub extern "C" fn XPluginStop() {
     let _ = std::panic::catch_unwind(|| {
         XPluginDisable();
+        // Join the publisher worker before the DLL can be unloaded
+        // (Task 7.1 review BLOCKER): FreeLibrary under a live thread
+        // crashes the simulator on Reload Plugins. Shutdown-aware
+        // sleeps bound the wait to well under a second; the 5 s write
+        // timeout bounds the pathological client case.
+        if let Ok(mut w) = WORKER.lock()
+            && let Some(handle) = w.take()
+        {
+            let _ = handle.join();
+        }
         if let Ok(mut guard) = STATE.lock() {
             *guard = None;
         }
