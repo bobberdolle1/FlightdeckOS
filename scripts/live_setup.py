@@ -83,6 +83,66 @@ def native_ramp_starts(airport_id: str):
     return starts
 
 
+def native_runways(airport_id: str):
+    """Parse apt.dat code-100 runway headers for one airport.
+
+    Returns dicts with per-threshold provenance (apt.dat line number) —
+    the sanctioned source for runway_start selection.
+    """
+    out = []
+    in_block = False
+    with open(APT_DAT, "r", encoding="utf-8", errors="replace") as f:
+        for lineno, line in enumerate(f, 1):
+            if line.startswith("1 "):
+                parts = line.split()
+                if len(parts) > 4 and parts[4] == airport_id:
+                    in_block = True
+                continue
+            if in_block and line.startswith("1 "):
+                break
+            if in_block and line.startswith("100 "):
+                parts = line.split()
+                # 100 <width> <surface> <shoulder> <smooth> <centerline> <edge_l> <edge_r> <id1> <lat1> <lon1> ... <id2> <lat2> <lon2> ...
+                if len(parts) >= 18:
+                    out.append(
+                        {
+                            "runway": parts[8],
+                            "lat": float(parts[9]),
+                            "lon": float(parts[10]),
+                            "provenance": f"{APT_DAT}:{lineno}",
+                        }
+                    )
+                    out.append(
+                        {
+                            "runway": parts[17],
+                            "lat": float(parts[18]),
+                            "lon": float(parts[19]),
+                            "provenance": f"{APT_DAT}:{lineno}",
+                        }
+                    )
+    return out
+
+
+def init_flight_runway(acf_rel: str, airport_id: str, runway: str):
+    body = {
+        "aircraft": {"path": acf_rel},
+        "runway_start": {"airport_id": airport_id, "runway": runway},
+    }
+    req = urllib.request.Request(
+        f"{WEBAPI}/api/v3/flight",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None  # reload blocks the API until the flight is up
+
+
 def init_flight(acf_rel: str, ramp: dict):
     body = {
         "aircraft": {"path": acf_rel},
