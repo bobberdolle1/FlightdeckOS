@@ -17,6 +17,7 @@
 
 pub mod fdm;
 pub mod fdr;
+pub mod plan_replay;
 pub mod qoa;
 pub mod qol;
 pub mod session;

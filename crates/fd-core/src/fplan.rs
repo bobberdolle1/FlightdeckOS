@@ -265,14 +265,15 @@ impl NavMatch {
 
 /// Read-only navigation context state (§16). Navigation context, NOT
 /// Mission phase — the two are kept separate by construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ProcedurePhase {
+    #[default]
+    Unknown,
     Enroute,
     Sid,
     Star,
     Approach,
     MissedApproach,
-    Unknown,
 }
 
 /// Correlated procedure family (§15).

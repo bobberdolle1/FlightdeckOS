@@ -327,6 +327,9 @@ struct FmsWatcher {
     not_found: u64,
     /// Typed classification of the LAST ingestion (§12/§37).
     last_changes: Vec<FlightPlanChange>,
+    /// Last observed approach-plan presence (§12: approach loaded/cleared
+    /// is a meaningful revision).
+    last_approach_loaded: Option<bool>,
 }
 
 impl FmsWatcher {
@@ -344,6 +347,7 @@ impl FmsWatcher {
             ambiguous: 0,
             not_found: 0,
             last_changes: Vec::new(),
+            last_approach_loaded: None,
         }
     }
 
@@ -479,6 +483,7 @@ impl FmsWatcher {
         self.changes.clear();
         self.changes_truncated = 0;
         self.last_changes.clear();
+        self.last_approach_loaded = None;
         // The connection itself survives an aircraft reload (session-
         // scoped ids are dataref-level, the bridge is independent); a
         // simulator restart kills it — the reconnect path handles both.
@@ -715,7 +720,28 @@ pub fn run_observe(opts: ObserveOpts) -> anyhow::Result<()> {
                         kind: "flight_plan".into(),
                         detail: format!("{:?}", fms.last_changes),
                         payload: Some(FdrEventPayload::FlightPlanChanged {
-                            changes: fms.last_changes.clone(),
+                            changes: {
+                                let mut changes = fms.last_changes.clone();
+                                // Approach presence flips are part of the same
+                                // revision classification (§12).
+                                for c in &fms.changes {
+                                    if c == "ApproachLoaded"
+                                        && !changes
+                                            .iter()
+                                            .any(|c| matches!(c, FlightPlanChange::ApproachLoaded))
+                                    {
+                                        changes.push(FlightPlanChange::ApproachLoaded);
+                                    }
+                                    if c == "ApproachCleared"
+                                        && !changes
+                                            .iter()
+                                            .any(|c| matches!(c, FlightPlanChange::ApproachCleared))
+                                    {
+                                        changes.push(FlightPlanChange::ApproachCleared);
+                                    }
+                                }
+                                changes
+                            },
                             revision_hash: new_snap.revision_hash,
                             primary_entries: new_snap
                                 .primary()
