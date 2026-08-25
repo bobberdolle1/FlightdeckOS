@@ -409,6 +409,10 @@ name = "fd-xplm-bridge"
 version = "0.1.0"
 
 [[package]]
+name = "fd-xplm-operator"
+version = "0.1.0"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

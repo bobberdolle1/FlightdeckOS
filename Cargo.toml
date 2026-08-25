@@ -16,6 +16,7 @@ members = [
     "crates/fd-crew",
     "crates/fd-debrief",
     "crates/fd-xplm-bridge",
+    "crates/fd-xplm-operator",
 ]
 
 [workspace.package]

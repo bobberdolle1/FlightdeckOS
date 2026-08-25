@@ -18,6 +18,10 @@ Canonical documentation. Historical design notes live in
 - [XPLANE.md](XPLANE.md) — X-Plane 12 transports, safe control, limitations
 - MSFS: SimConnect foundation only — see ARCHITECTURE.md and STATUS.md
 
+## Data sources
+
+- [DATA_SOURCES.md](DATA_SOURCES.md) — source-of-truth matrix (spawn, nav data, FMS, Navigraph policy)
+
 ## Aircraft & data
 
 - [AIRCRAFT_PROFILES.md](AIRCRAFT_PROFILES.md) — packages, identity, Generic mode, Profile Genesis
